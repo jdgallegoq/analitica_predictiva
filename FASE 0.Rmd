@@ -1,0 +1,71 @@
+---
+title: "Trabajo Final Fase 0"
+author: "Juan Diego Gallego Q"
+date: "2/8/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(stringr)
+```
+
+## Conseguir la información
+
+Se ha conseguido la información directamente de la página web GeoMedellin. Se han descargado los datasets de los periodos 2014 a 2018. 
+
+**ESTO TOCA CAMBIARLO A LEER CSV DESDE UNA PAGINA WEB. YA SUBI LOS DOCS A GITHUB, ENTONCES TENDRÍA QUE PONER LA URL DEL RAW DE CADA ARCHIVO. 
+
+```{r cars}
+accidentes_2014 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2014.csv", 
+                            na = "empty")
+accidentes_2015 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2015.csv", 
+                            na = "empty")
+accidentes_2016 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2016.csv",
+                            na = "empty")
+accidentes_2017 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2017.csv", 
+                            na = "empty")
+accidentes_2018 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2018.csv", 
+                            na = "0")
+```
+
+Combinamos ahora todos los datasets para trabajar con uno general. 
+
+```{r}
+accidentes<- rbind(accidentes_2018, accidentes_2017, accidentes_2016,
+                   accidentes_2015, accidentes_2014)
+```
+
+
+## Lectura de los datos.
+
+  ## Limpieza de los datos.
+
+Exploremos un poco que trae este dataset
+
+```{r}
+head(accidentes)
+```
+
+Lascolumnas X, Y son una copia de las columnas Longitud y Latitud, vamos a eliminarlas del computo.
+
+```{r}
+accidentes<- accidentes[, c(-1,-2)]
+```
+
+Nos centramos en este momento para organizar la columna Fecha, que muestre un formato AAA-MM-DD 
+
+```{r}
+accidentes$FECHA<- as.Date(str_split_fixed(accidentes$FECHA, " ", 2)[,1])
+```
+
+Ahora, encontramos que aun hace falta conseguir los meses para la columna MES_NOMBRE. 
+
+```{r}
+accidentes$MES_NOMBRE<- format(accidentes$FECHA, "%B")
+```
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
