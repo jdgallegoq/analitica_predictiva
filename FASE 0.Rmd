@@ -9,6 +9,8 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(readr)
 library(stringr)
+library(plotly)
+library(dplyr)
 ```
 
 ## Conseguir la información
@@ -19,15 +21,15 @@ Se ha conseguido la información directamente de la página web GeoMedellin. Se 
 
 ```{r cars}
 accidentes_2014 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2014.csv", 
-                            na = "empty")
+                            na = "NA")
 accidentes_2015 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2015.csv", 
-                            na = "empty")
+                            na = "NA")
 accidentes_2016 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2016.csv",
-                            na = "empty")
+                            na = "NA")
 accidentes_2017 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2017.csv", 
-                            na = "empty")
+                            na = "NA")
 accidentes_2018 <- read_csv("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/trabajo_predictiva/Accidentalidad_georreferenciada_2018.csv", 
-                            na = "0")
+                            na = "NA")
 ```
 
 Combinamos ahora todos los datasets para trabajar con uno general. 
@@ -66,6 +68,61 @@ Ahora, encontramos que aun hace falta conseguir los meses para la columna MES_NO
 accidentes$MES_NOMBRE<- format(accidentes$FECHA, "%B")
 ```
 
+Observemos los tipos de accidentes disponibles.
+
+```{r}
+unique(accidentes$CLASE)
+```
+
+Vemos entonces que existen 4 clases de accidentes que son realmente las mismas y pueden estandarizarse como "Caida Ocupante".
+
+```{r}
+accidentes$CLASE[accidentes$CLASE == "Caída Ocupante"] <- "Caida ocupante"
+accidentes$CLASE[accidentes$CLASE == "Caida Ocupante"] <- "Caida ocupante"
+accidentes$CLASE[accidentes$CLASE == "Caída de Ocupante"] <- "Caida ocupante"
+accidentes$CLASE[accidentes$CLASE == "Caida de Ocupante"] <- "Caida ocupante"
+```
+
+Miremos cómo han quedado las clases después de los reemplazos: 
+
+```{r}
+unique(accidentes$CLASE)
+```
+
+Ahora qué niveles de gravedad de accidentes aparecen registrados:
+
+```{r}
+unique(accidentes$GRAVEDAD)
+```
+
+Conociendo el contenido del dataset accidentes, veamos algunas cifras: 
+
+```{r}
+table(accidentes$GRAVEDAD, accidentes$PERIODO)
+```
+ 
+Antes de exponer la figura de accidntes por año y gravedad, se debieron hacer los siguientes computos.
+Sacar una tabla para conseguir los totales de gravedad por año.Por consgguiente transformar la tabla a un data frame. Finalmente cambio los nombres de las columnas para evitar insertar caracteres especiales no reconocidos por R.
+```{r}
+acc_fig1 <- accidentes[, c("PERIODO", "CLASE", "GRAVEDAD")]
+tabla <- table(acc_fig1$PERIODO, acc_fig1$GRAVEDAD)
+acc_fig1 <- as.data.frame.matrix(tabla)
+colnames(acc_fig1) <- c("herido", "muerto", "solo_danos")
+acc_fig1
+```
+
+Luego de tener un data frame contenedor de lainformacion necesaria, se procede a graficar la info:
+
+```{r}
+fig1 <- plot_ly(acc_fig1, x = ~unique(accidentes$PERIODO),
+                y = ~herido, type = 'bar', name = 'Herido')
+fig1 <- fig1 %>% add_trace(y = ~solo_danos, name = 'Solo Daños')
+fig1 <- fig1 %>% add_trace(y= ~muerto, name = 'Muertos')
+fig1 <- fig1 %>% layout(yaxis = list(title = 'Cantidad'),
+                        xaxis = list(title = 'Año'),
+                        barmode = 'stack')
+fig1
+```
 
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
