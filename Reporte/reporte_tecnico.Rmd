@@ -1,0 +1,1448 @@
+---
+title: "Reporte Técnico Trabajo Final Analítica Predictiva"
+author: "Maria Alejandra Bernal Patiño, Ligia Fernanda Zabala Gamez, Jhon Alexander Parra Jiménez, Juan Diego Gallego Quiceno"
+date: "03/09/2020"
+output: html_document
+---
+
+# Introducción.
+
+El presente reporte técnico recopila el desarrollo del trabajo final de la asignatura Analítica Predictiva dictada por la Facultad de Minas en la Universidad Nacional de Colombia sede Medellín.
+
+# Lineamientos del Trabajo.
+
+  ## Objetivo General.
+    
+Predecir los accidentes en la ciudad de Medellín, tomando como insumo los datos abiertos de movilidad, publicados por la Alcaldía de Medellín en el portal [GeoMedellin](https://www.medellin.gov.co/geomedellin/).
+
+  ## Entrenamiento de un modelo preditivo.
+
+Se requiere construir un modelo de prediccion que pueda pronosticar los accidentes en la ciudad a nivel de barrio por cada clase de accidente a una periodicidad diaria, semanal y mensual
+
+  ## Agrupamiento de los barrios de Medellín según su accidentalidad.
+
+Además del modelo se exige desarrollar un agrupamiento de los barrios de Medellín de acuerdo con su accidentalidad. 
+
+  ## Presentación.
+
+Los hallazgos y el modelamiento están disponibles para su uso a través de una aplicación web, la cual puede visitarse ["aquí"](https://jparraj-unal.shinyapps.io/Accidentalmente_Medellin/?_ga=2.7686002.1982686777.1599195716-827335331.1597611417), que cuenta además con [video](https://www.youtube.com/watch?v=L85SBKXriDQ&feature=youtu.be) promocional.
+
+# Contextualización.
+
+Medellín con 2'569.007 (proyección del DANE 2020) habitantes es la segunda ciudad más poblada de Colombia, la cual es caracterizada por ser la ciudad con mejor calidad de vida, según Ciudades Cómo Vamos; y ser la segunda ciudad en aportar más al PIB del país, al rededor de 14,38% a 2018. La fuerte industria de la ciudad se ha expandido a los municipios metropolitanos, constuyendo de esta manera, una zona del País con alto desarrollo económico.
+
+Tomando como punto de partida la importancia de la ciudad, se espera que al ser un municipio agitado por sus condiciones económicas y sociales, por consiguiente, se tengan cifras de accidentalidad altas, por tanto resulte conveniente desarrollar un modelo de pronóstico que permita predecir la cantidad de accidentes y así llevar a cabo planes de acción que busquen mitigar al máximo la accidentalidad en la ciudad. 
+
+# Geolocalización y Determinación del Espacio de Trabajo.
+
+Como se menciona en la introducción y en el objetivo general, se trabaja con datos abiertos proporcionados por la Alcaldía de Medellín  sobre el registro de accidentes en la ciudad y corregimientos aledaños. 
+
+# Desarrollo del Trabajo.
+
+Librerias usadas:
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plotly)
+library(leaflet)
+library(tidyr)
+library(dplyr)
+library(rgdal)
+library(lubridate)
+library(rgdal)
+library(stringi)
+library(randomForest)
+library(plotly)
+library(clValid)
+library(caret)
+library(tfdatasets)
+library(keras)
+library(tsibble)
+library(fable)
+library(rpart)
+```
+
+  ## Captura de Datos.
+  
+Para dar cumplimiento a los parámetros establecidos, se descargan las series de datos pertenecientes a los años 2014, 2015, 2016, 2017 y 2018, por consiguiente se procede a combinar todos los archivos para obtener un sólo set de datos.
+
+```{r}
+urlfile <- "https://raw.githubusercontent.com/jdgallegoq/analitica_predictiva/master/accidentes3.csv"
+accidentes <- read.csv(urlfile, fileEncoding = "ISO-8859-1")
+#accidentes <- read.csv("D:/jhoparra/2020-1/Predictiva/analitica_predictiva/accidentes3.csv",fileEncoding = "ISO-8859-1")
+```
+
+El set de datos original contiene las siguientes variables:
+```{r}
+colnames(accidentes)
+```
+De las cuales las más relevantes para el desarrollo de todo el trabajo son:
+  1. Fecha.
+  2. Día.
+  3. Periodo (Año).
+  4. Clase
+  5. Gravedad. 
+  6. Barrio.
+  7. Comuna.
+  8. Dia Nombre.
+  9. Mes.
+  10. Mes Nombre.
+  11. Longitud.
+  12. Latitud.
+  
+las clases de accidentes descritas son las siguientes:
+```{r}
+unique(accidentes$CLASE)
+```
+Por otra parte las gravedades de los accidentes son:
+```{r}
+unique(accidentes$GRAVEDAD)
+```
+
+## Preprocesamiento y Descripción.
+
+Tomando como base las clases y las gravedades de accidentes, por año se tienen las siguientes cifras:
+```{r}
+table(accidentes$PERIODO, accidentes$CLASE)
+```
+```{r}
+table(accidentes$PERIODO, accidentes$GRAVEDAD)
+```
+El siguiente gráfico de barras apiladas permitirá diferenciar de manera visual las frecuencias de cada gravedad por año.
+
+```{r}
+acc_fig1 <- accidentes[, c("PERIODO", "CLASE", "GRAVEDAD")]
+tabla <- table(acc_fig1$PERIODO, acc_fig1$GRAVEDAD)
+acc_fig1 <- as.data.frame.matrix(tabla)
+colnames(acc_fig1) <- c("herido", "muerto", "solo_danos")
+fig1 <- plot_ly(acc_fig1, x = ~unique(accidentes$PERIODO),
+                y = ~herido, type = 'bar', name = 'Herido', text = acc_fig1$herido,
+                textposition = 'outside',
+                marker = list(line = list('rgb(105,105.105)')))
+fig1 <- fig1 %>% add_trace(y = ~solo_danos, name = 'Solo Daños', text = acc_fig1$solo_danos,
+                           textposition = 'outside',
+                           marker = list(line = list('rgb(105,105.105)')))
+fig1 <- fig1 %>% add_trace(y= ~muerto, name = 'Muertos', text = acc_fig1$muerto,
+                           textposition = 'outside',
+                           marker = list(line = list('rgb(105,105.105)')))
+fig1 <- fig1 %>% layout(title = "Accidentes por Clase y Año",
+                        yaxis = list(title = 'Accidentes'),
+                        xaxis = list(title = 'Año'),
+                        barmode = 'stack')
+fig1
+```
+
+Se puede percibir que el año 2016 ha sido el año con mayor accidentalidad entre 2014 y 2018, sin embargo, los accidentes mortales no son percibibles en las barras apiladas dada la diferencia de frencuencias con las otras gravedades; por esta razón se exponen únicamente los accidentes mortales en el siguiente gráfico:
+```{r}
+fig2 <- plot_ly(acc_fig1, x = ~unique(accidentes$PERIODO),
+                y = ~muerto, type = 'bar', name = 'Accidentes Fatales',
+                text = acc_fig1$muerto, textposition = 'outside',
+                 marker = list(line = list('rgb(105,105.105)')))
+fig2 <- fig2 %>% layout(title = "Accidentes Fatales por año",
+                        yaxis = list(title = 'Acc'),
+                        xaxis = list(title = 'Año'),
+                        barmode = 'stack')
+fig2
+```
+
+Aunque el gráfico de barras apiladas mostraba al año 2014 como el año con menos accidentalidad, el año 2014 fue año con mayor cantidad de accidentes fatales.
+
+Después de haber graficado las frecuencias de accidentes por año, la siguiente serie de tiempo expone la evolución de los accidentes por mes, comparando por lineas cada año de resgistros:
+```{r}
+acc_fig3 <- as.data.frame(as.Date(accidentes[, "FECHA"], format = "%Y-%m-%d"))
+colnames(acc_fig3) <- "FECHA"
+acc_fig3$MES <- strftime(acc_fig3$FECHA, format = "%m")
+acc_fig3$ANO <- strftime(acc_fig3$FECHA, format = "%Y")
+acc_fig3 <- as.data.frame.matrix(table(mes = acc_fig3$MES, ano = acc_fig3$ANO))
+acc_fig3$MES <- row.names(acc_fig3)
+fig3 <- plot_ly(acc_fig3, x = ~MES, y = ~acc_fig3$`2018`, name = '2018',
+                type = 'scatter', mode = 'lines',
+                line = list(color = 'rgb(205, 12, 24)', width = 4))
+fig3 <- fig3 %>% add_trace(y = ~acc_fig3$`2017`, name = '2017', line = list(color = 'rgb(22, 96, 167)', width = 4)) 
+fig3 <- fig3 %>% add_trace(y = ~acc_fig3$`2016`, name = '2016', line = list(color = 'rgb(205, 12, 24)', width = 4, dash = 'dash'))
+fig3 <- fig3 %>% add_trace(y = ~acc_fig3$`2015`, name = '2015', line = list(color = 'rgb(22, 96, 167)', width = 4, dash = 'dot'))
+fig3 <- fig3 %>% add_trace(y = ~acc_fig3$`2014`, name = '2014', line = list(color = 'rgb(205, 12, 24)', width = 4, dash = 'dot'))
+fig3 <- fig3 %>% layout(title = "Accidentes por Mes",
+         xaxis = list(title = "Meses"),
+         yaxis = list (title = "Accidentes"))
+fig3
+```
+
+A partir de la serie de tiempo graficada se pueden comentar las siguientes ideas:
+  1. Los cuatro años concuerdan en que el mes con menos accidentes es Enero. Es un mes "de reposo" despues de las festividades de Fin de Año.
+  2. Los accidentes en el mes de marzo fueron disminuyendo año tras año. la direfencia es considerable al pasar en 2014 de 3855 accidentes a 3335 accidentes el 2018.
+  3.Se presenta el mismo pico en el mes Mayo en 3 de los 4 años; siendo por año, uno de los meses con mayor accidentalidad. 
+  4. 3 de los 4 años, concuerdan en que Agosto es el mes con mayor accidentalidad del año.
+
+Estos comportamientos pueden darse dado fechas especiales de cada mes con alta frecuencia de accidentes; por ejemplo en marzo el día de la mujer; en mayo el día de la madre, en agosto la feria de flores.
+
+Con base en lo anterior, se hará una ampliación sobre la siguiente medida de tiempo, los días por mes. 
+Con base en lo anterior, se hará una ampliación sobre la siguiente medida de tiempo, los días por mes. De esta mandera el siguiente mapa de calor mostrará cuáles son los días por mes que mayor accidentalidad presentan.
+```{r}
+acc_fig4 <- as.data.frame(as.Date(accidentes[, "FECHA"], format = "%Y-%m-%d"))
+colnames(acc_fig4) <- "FECHA"
+acc_fig4$MES <- strftime(acc_fig4$FECHA, format = "%B")
+acc_fig4$MES <- factor(acc_fig4$MES, levels = c("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"))
+acc_fig4$DIA <- strftime(acc_fig4$FECHA, format = "%A")
+acc_fig4$DIA <- factor(acc_fig4$DIA, levels = c("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"))
+acc_fig4m <- as.matrix(table(acc_fig4$MES, acc_fig4$DIA))
+acc_fig4m <- apply(acc_fig4m, 2, function(x){x/mean(x)})
+fig5 <- plot_ly(x=colnames(acc_fig4m), y=rownames(acc_fig4m),
+                showscale = F,
+                z = acc_fig4m,
+                colors = colorRamp(c("lightgoldenrod1", "indianred2")),
+                type = "heatmap")
+fig5
+```
+
+La gráfica de calor muestra que los días viernes y jueves en los meses agosto y septiembre son los días con mayor accidentalidad en los 4 años considerados y que los días con menos accidentalidad son los lunes, específicamente en los meses enero, junio y noviembre; sin embargo el día que por mes tiene más accidentalidad es el sábado.
+
+Habiendo visto de manera gráfica como se comportan las frecuencias de los accidentes, se procede a depurar y limpiar la base de datos con el objetivo de encontrar nuevas variables entre las relaciones de las existentes; además se continúa con la sección de agrupamiento.
+
+  ## Agrupamiento
+
+```{r}
+table(accidentes$GRAVEDAD)
+```
+
+```{r}
+table(accidentes$CLASE)
+```
+
+Dado que la clase del accidente puede proveer estadísticas importantes para realizar el agrupamiento de barrios se procede a unificar para tener categorías con una cantidad importante de registros. Por esta razón, las categorías vacías e Incendio serán agregadas a la categoría Otro, por otro lado, La categoría Choque y Atropello se agregará a los datos de la categoría Choque.
+```{r}
+accidentes <- accidentes %>%
+  rename(BARRIO_1 = BARRIO)
+accidentes$CLASE <- gsub("Incendio","Otro",accidentes$CLASE)
+accidentes$CLASE <- gsub("Choque y Atropello","Choque",accidentes$CLASE)
+accidentes$CLASE[accidentes$CLASE == ""] <- "Otro"
+table(accidentes$CLASE)
+```
+Con esta información es necesario idear algunos indicadores que más allá de sus valores aporten información y sean útiles para la intervención de la accidentalidad. En un principio se pueden establecer indicadores para cada una de las categorías de la clase de accidente así como la gravedad de los mismos y la población de cada barrio.
+
+Hasta el momento los indicadores definidos para el agrupamiento son:
+
+1. Accidentes con atropello.
+  a. Heridos.
+  b. Muertos.
+  c. Solo daños.
+2. Accidente de choque.
+  a. Heridos.
+  b. Muertos.
+  c. Solo daños.
+3. Accidente de caida ocupante.
+  a. Heridos.
+  b. Muertos.
+  c. Solo daños.
+4. Accidente de volcamiento.
+  a. Heridos.
+  b. Muertos.
+  c. Solo daños.
+5. Otro tipo de accidentes.
+  a. Heridos.
+  b. Muertos.
+  c. Solo daños.
+
+Ya que existen algunos datos faltantes para el tema de los barrios se procede a asignarle su respectivo barrio de acuerdo a sus coordenadas. Para se importa el archivo [geoJson](https://geomedellin-m-medellin.opendata.arcgis.com/datasets/limite-barrio-vereda-catastral). que contiene los polígonos de los barrios de Medellín. Este procedimiento es igualmente válido para poder graficar el mapa adecuadamente con los resultados del clustering.
+
+```{r}
+Sys.setlocale(locale = "Spanish")
+barrios_medellin <- readOGR("G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/analitica_predictiva/Agrupamiento/Limite_Barrio_Vereda_Catastral.geojson",
+                            stringsAsFactors = FALSE,use_iconv = TRUE,encoding = "UTF-8")
+```
+
+Para realizar este proceso es necesario que los puntos provenientes de la accidentalidad se encuentren en la misma proyección de los polígonos.
+
+```{r}
+accidentes_spatial <- accidentes
+coordinates(accidentes_spatial) <- ~LONGITUD+LATITUD
+proj4string(accidentes_spatial) <- proj4string(barrios_medellin)
+```
+
+Ahora se llama la función `over` de la librería `sp` para determinar los poligonos en los que se encuentra cada punto, este proceso ayudará a declarar los nombres de los barrios de una manera estándar para generar el mapa.
+
+```{r}
+## Código para determinar en cuáles barrios se encuentran los puntos
+contains_barrio <- over(accidentes_spatial, barrios_medellin)
+```
+
+De esta manera, ahora se añade la información del archivo geojson al data frame para poder identificar los puntos que se encuentran sin barrio.
+
+```{r}
+accidentes <- cbind(accidentes,contains_barrio)
+```
+
+Se someterá el set de datos a una búsqueda de datos faltantes:
+```{r}
+table(is.na(accidentes$NOMBRE_BARRIO))
+```
+Siguen existiendo 515 registros sin un barrio asignado, los cuales se apartan del set de datos base.
+```{r}
+accidentes_na <- accidentes[is.na(accidentes$NOMBRE_BARRIO),]
+```
+
+Después de analizar los datos faltantes, se puede observar que estos registros se encuentran por fuera de la región considera Medellín de acuerdo a las delimitaciones encontradas en el archivo geojson, por esta razón se eliminarán del conjunto de datos.
+
+```{r}
+accidentes <- accidentes[!is.na(accidentes$NOMBRE_BARRIO),]
+table(is.na(accidentes$NOMBRE_BARRIO))
+```
+Ahora con estos datos podemos proceder a realizar mapas y hacer el análisis por clustering. Para comenzar se ilustrará un ejemplo simple con el número total de accidentes.
+```{r}
+## Obtener indicador de cantidad de accidentes por barrio en total
+barrios_ejemplo <- accidentes %>%
+  select(NOMBRE_BARRIO) %>%
+  group_by(NOMBRE_BARRIO) %>%
+  summarize(conteo = n())
+head(barrios_ejemplo)
+```
+```{r}
+## Copia del spatial data frame
+barrios_med_ejemplo <- barrios_medellin
+
+## Sacar index para organizar luego los registros
+barrios_med_ejemplo@data$index <- as.integer(row.names(barrios_med_ejemplo@data))
+
+## Combinar el indicador con el data frame spatial para graficar en mapa
+barrios_med_ejemplo@data <- merge(barrios_med_ejemplo@data,barrios_ejemplo,by = "NOMBRE_BARRIO",all.x=TRUE)
+barrios_med_ejemplo@data <- barrios_med_ejemplo@data %>% arrange(index)
+barrios_med_ejemplo@data$conteo[is.na(barrios_med_ejemplo@data$conteo)] <- 0
+```
+Mapa
+
+```{r}
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g accidentes en total",
+  barrios_med_ejemplo@data$NOMBRE_BARRIO, barrios_med_ejemplo@data$conteo
+) %>% lapply(htmltools::HTML)
+
+pal <- colorNumeric("YlOrRd", NULL)
+
+leaflet(barrios_med_ejemplo)%>% 
+  addTiles()  %>% 
+  setView(lat=6.247612, lng=-75.582932, zoom=11.5) %>%
+  addPolygons(color="grey",weight = 1, fillOpacity = 0.75,opacity = 1, smoothFactor = 0.7, fillColor = ~pal(conteo),
+  highlight = highlightOptions(
+    weight = 3,
+    color = "#666",
+    fillOpacity = 0.8,
+    bringToFront = TRUE),
+  label = labels,
+  labelOptions = labelOptions(
+    style = list("font-weight" = "normal", padding = "3px 8px"),
+    textsize = "15px",
+    direction = "auto")) %>% 
+  addLegend(pal = pal, values = ~conteo, opacity = 0.7, title = "Cant. accidentes",
+            position = "topright")
+```
+
+El mapa proyectado se toma como base para la aplicación de Shiny, además se toma como punto de partida para el clustering que se desarrolla en esta sección.
+Gráficamente, el mapa permite observar la mayor cantidad de accidentes ocurren en barrios cercanos a las vías principales de la ciudad y en la vía de mayor flujo y con mayor límite de velocidad: la autopista regional. 
+
+### Agrupamiento con enfoque de variables de conteo
+
+El primer enfoque que se aborda es usando las variables con el conteo de cada indicador definido en la sección anterior, por lo cual los datos de cada barrio estarán en distintas escalas, es decir, los barrios que tengan más flujo vehicular pueden tener mayor cantidad de accidentes comparados con barrios con pocas vías o poco flujo vehicular.
+
+```{r}
+## Miramos la cantidad de accidentes por combinación de barrio, gravedad y clase de accidente
+barrios_conteo <- accidentes %>%
+  select(NOMBRE_BARRIO,GRAVEDAD,CLASE) %>%
+  group_by(NOMBRE_BARRIO,GRAVEDAD,CLASE) %>%
+  summarize(conteo = n())
+head(barrios_conteo)
+```
+```{r}
+## Ahora convertimos este data frame de formato narrow a formato wide
+barrios_conteo <- barrios_conteo %>%
+  mutate(indicador = paste(CLASE,GRAVEDAD,sep="_"))
+barrios_conteo <- barrios_conteo[,c("NOMBRE_BARRIO","indicador","conteo")]
+head(barrios_conteo)
+```
+
+```{r}
+barrios_conteo_indic <- barrios_conteo %>%
+  pivot_wider(values_from="conteo",names_from="indicador",values_fill = 0)
+head(barrios_conteo_indic)
+```
+```{r}
+barrios_conteo_indic <- as.data.frame(barrios_conteo_indic)
+row.names(barrios_conteo_indic) <- barrios_conteo_indic$NOMBRE_BARRIO
+barrios_conteo_indic <- barrios_conteo_indic[,-1]
+head(barrios_conteo_indic)
+```
+
+Con este set de datos extraído, se procede a realizar el agrupamiento jerárquico, con el fin de idear la cantidad de clústers con los cuales se ejecutará la técnica k-medias. Adicional a este último método, se usará la técnica DBSCAN para comparar los resultados obtenidos.
+
+Primero, se escalan los datos de cada una de las variables para evitar problemas por diferencia de unidades.
+
+```{r}
+## Escalar datos
+barrios_centrados <- scale(barrios_conteo_indic,center = TRUE,scale = TRUE)
+
+## Extraer datos de media y desviación estándar para poder reversar la operación más adelante
+print("Media:")
+(media <- attr(barrios_centrados,"scaled:center"))
+print("Desviación estándar:")
+(desv_est <- attr(barrios_centrados,"scaled:scale"))
+```
+
+Se puede concluir con base al escalamiento que los indicadores de algunas clases de accidente-gravedad no aportan mucha variabilidad en el conjunto de variables, por esta razón no podrían tener mucha influencia en el comportamiento de los clústers.
+
+#### Agrupamiento Jerárquico
+
+```{r}
+## Primero se computa la matriz de dissimilaridad
+d <- dist(barrios_centrados, method = "euclidean")
+
+## Usamos complete linkage como métrica entre clústers
+hc1 <- hclust(d, method = "complete" )
+
+## Dendograma
+plot(hc1, cex = 0.6, hang = -1)
+```
+
+Por medio de esta grpafica se puede intuir que existir unos cuatro clústers en el agrupamiento por barrios. Para comprobar esto, se usarán distintas métricas, como slihoutte y el indíce de Dunn, con el fin de determinar qué tan bien conformados están los clústers. Por otro lado, se hace uso de una grilla de posibles valores para el desarrollo de la técnica k-medias.
+
+#### K-Medias
+
+```{r}
+kmeans_barrios <- kmeans(barrios_centrados,4)
+clusters_barrios <- scale(kmeans_barrios$centers,center=FALSE,scale=1/desv_est)
+clusters_barrios <- scale(clusters_barrios,center = (-media),scale = FALSE)
+print(clusters_barrios)
+```
+De acuerdo con los resultados arrojados, se interpreta:
+- El clúster 3 y 4 tienden a tener un comportamiento similar en sus centroides, por tanto, la mejor opción sería agrupar tres clústers en el cual estos dos grupos se dejen en un único grupo. 
+- Por otra parte, el grupo 1 presenta una alta tasa en todas las estadísticas, es decir es el grupo de barrios que tienen mayor cantidad de heridos y muertos en choques y atropellos.
+- En tanto el grupo 2 tiene las estadísticas más bajas de los grupos conformados por esta técnica.
+
+Para poder determinar el mejor número de clústers a utilizar utilizaremos el índice de Dunn, que mide el ratio de la distancia más pequeña de observaciones de diferentes grupos contra la distancia más grande encontrada en un sólo cluster. Este valor va de 0 a infinito y valores más grandes indican una mejor separación.
+
+```{r}
+dunn(clusters = kmeans_barrios$cluster, Data = barrios_centrados, method = "euclidean")
+```
+A pesar de que el código arroja un mensaje de advertencia no existe una influencia en la computación de la métrica de acuerdo a una investigación y comparación de valores realizadas.
+
+Ahora se procede a probar distintos valores de k, desde 3 hasta 25, para así poder determinar el mejor número de grupos que nos dé indicaciones de como abordar el problema de accidentalidad.
+
+```{r}
+k_test <- 3:25
+k_full <- lapply(k_test,FUN=function(k){
+  kmeans_barrios <- kmeans(barrios_centrados,k)
+  return(kmeans_barrios)
+})
+
+dunn_full <- sapply(k_full,FUN = function(l){
+  dunn_index <- dunn(clusters = l$cluster, Data = barrios_centrados, method = "euclidean")
+  return(dunn_index)
+})
+
+data_dunn <- data.frame(k_test,dunn_full)
+fig <- plot_ly(data_dunn, x = ~k_test, y = ~dunn_full, type = 'scatter', mode = 'lines')
+fig <- fig %>% layout(title = "Indice de Dunn por cantidad de clusters")
+fig
+```
+
+```{r}
+val_full <- sapply(k_full,FUN = function(l){
+  value_rmse <- l$tot.withinss
+  return(value_rmse)
+})
+
+data_ss <- data.frame(k_test,val_full)
+fig <- plot_ly(data_ss, x = ~k_test, y = ~val_full, type = 'scatter', mode = 'lines')
+fig <- fig %>% layout(title = "Suma de error cuadrático total por cantidad de clusters")
+fig
+```
+
+Con base en ambas gráficas se puede determinar que el número de clústers que mejor distribuye los datos en distintos grupos es 16, lo cual indica que se requiere de una gran cantidad de grupos para que la variabilidad de cada uno de los grupos sea adecuada y por lo tanto que cada centroide explique de manera adecuada las características de los barrios que conforman cada grupo.
+
+#### DBSCAN
+
+Para terminar de corroborar esta información se procede a realizar el agrupamiento de los barrios usando el algoritmo DBSCAN el cual estima los grupos tomando en cuenta la densidad de los puntos. Dicho algoritmo es capaz de detectar grupos con cualquier tipo de forma.
+
+Este algoritmo tiene en cuenta dos parámetros principales. El primero es el radio que se utiliza para la detección de los grupos basados en la densidad. El segundo parámetro, es la cantidad de puntos que debe encontrar un punto dentro del radio definido para considerarse como un punto principal. 
+
+Para obtener estos parámetros es necesario probar distintos escenarios para encontrar la mejor agrupación posible. En el caso del número de puntos en cada clúster se prueban distintos valores entre 3 y 10; con este valor se estima el radio que se utilizará en el algoritmo con el método de la rodilla con la distancia media que se encuentra usando el algoritmo de KNN, donde k es el número de puntos (desde 3 hasta 10).
+
+```{r}
+dbscan::kNNdistplot(barrios_centrados, k =  3)
+abline(h = 3.1, lty = 2)
+```
+La gráfica anterior muestra que la distancia media usando 3 vecinos es un valor cercano a 3.1, por lo que se establece dicho valor como el radio y el número de puntos igual a 3.
+
+```{r}
+db <- fpc::dbscan(barrios_centrados, eps = 3.1, MinPts = 3)
+table(db$cluster)
+```
+```{r}
+print("Índice de Dunn DBSCAN")
+dunn(clusters = db$cluster, Data = barrios_centrados)
+```
+```{r}
+print("Índice de Dunn K-Means")
+dunn(clusters = k_full[[16]]$cluster, Data = barrios_centrados)
+```
+
+En este caso el modelo de agrupamiento realizado con DBSCAN arrojó 3 grupos diferentes similar a lo realizado con K-Medias (3). Además, al comparar los resultados por el índice de Dunn del mejor de los escenarios de K-Medias con los resultados de DBSCAN se encuentra que DBSCAN mejora el desempeño al maximizar este índice, lo que indica que la relación entre la menor distancia entre dos grupos diferentes y la mayor distancia intra grupo es mayor en este escenario que en el caso de k-medias.
+
+Esto indica que los grupos de barrios puede tener formas complejas que no son fácilmente identificables por k-medias.
+
+Dado esta información partiremos de los 3 grupos encontrados con DBSCAN para obtener el mapa del agrupamiento de los barrios por accidentalidad.
+
+### Enfoque con variables porcentuales
+
+En este enfoque se usarán las mismas variables que en el enfoque anterior pero con la diferencia de que en este caso se calculará el porcentaje de gravedad de accidente por tipo de accidente. Es decir, un barrio cualquiera puede tener cien accidentes de choque, pero dentro de esos cien accidentes de choque cincuenta resultan con al menos una persona herida, treienta con solo daños materiales y veinte con al menos un muerto. El indicador de choque_muerto sería igual a 0.2 o 20% y así sucesivamente para cada uno de los barrios. Por la naturaleza del cálculo de los indicadores, en esta ocasión no es necesario escalar las variables porque ya todas se encontrarán en un rango de 0 a 1. Además de lo descrito, en este enfoque se agrega la variable de cantidad de accidentes totales para cada barrio. Esta variable si se transfomará con e fin de manipularla en un rango 0 a 1, y que gracias a esto no tenga un peso mayor en el cálculo de la distancia, para esto se utiliza la transformación min max.
+
+Ya que se hará uso de los mismos indicadores se tomará como base los datos del enfoque anterior y calcularemos el total por accidente para poder estimar los porcentajes.
+
+```{r}
+## Miramos la cantidad de accidentes por combinación de barrio, gravedad y clase de accidente
+barrios_conteo2 <- accidentes %>%
+  select(NOMBRE_BARRIO,GRAVEDAD,CLASE) %>%
+  group_by(NOMBRE_BARRIO,GRAVEDAD,CLASE) %>%
+  summarize(conteo = n())
+head(barrios_conteo2)
+```
+
+Ahora se estiman los totales por tipo de accidente para calcular los porcentajes.
+
+```{r}
+barrios_conteo2_full <- accidentes %>%
+  select(NOMBRE_BARRIO,CLASE) %>%
+  group_by(NOMBRE_BARRIO,CLASE) %>%
+  summarize(conteo = n())
+head(barrios_conteo2_full)
+```
+Se cruzan las dos tablas para poder estimar los porcentajes.
+
+```{r}
+barrios_conteo2 <- merge(barrios_conteo2,barrios_conteo2_full,by=c("NOMBRE_BARRIO","CLASE"),all.x = TRUE)
+head(barrios_conteo2)
+```
+
+```{r}
+barrios_conteo2$perc <- barrios_conteo2$conteo.x/barrios_conteo2$conteo.y
+## Ahora convertimos este data frame de formato narrow a formato wide
+barrios_conteo2 <- barrios_conteo2 %>%
+  mutate(indicador = paste(CLASE,GRAVEDAD,sep="_"))
+barrios_conteo2 <- barrios_conteo2[,c("NOMBRE_BARRIO","indicador","perc")]
+head(barrios_conteo2)
+```
+
+Ahora se trasnforma el data frame a formato wide.
+
+```{r}
+barrios_conteo_indic2 <- barrios_conteo2 %>%
+  pivot_wider(values_from="perc",names_from="indicador",values_fill = 0)
+head(barrios_conteo_indic2)
+```
+
+Se agrega la variable con el total de accidentes por barrio.
+
+```{r}
+barrio_total <- accidentes %>%
+  select(NOMBRE_BARRIO) %>%
+  group_by(NOMBRE_BARRIO) %>%
+  summarize(total = n())
+barrios_conteo_indic2 <- merge(barrios_conteo_indic2,barrio_total,by="NOMBRE_BARRIO",all.x = TRUE)
+head(barrios_conteo_indic2)
+```
+Se transforma la variable del total con la transformación min max.
+
+```{r}
+max_total <- max(barrios_conteo_indic2$total)
+min_total <- min(barrios_conteo_indic2$total)
+barrios_conteo_indic2$total <- (barrios_conteo_indic2$total - min_total)/(max_total - min_total)
+row.names(barrios_conteo_indic2) <- barrios_conteo_indic2$NOMBRE_BARRIO
+barrios_conteo_indic2 <- barrios_conteo_indic2[,-1]
+head(barrios_conteo_indic2)
+```
+
+Ahora puede procederse a realizar el mismo procedimiento que se siguió en el primer enfoque para determinar los grupos de barrios que existen con esta configuración de variables.
+
+#### Hierarchical Clustering
+
+```{r}
+## Primero se computa la matriz de dissimilaridad
+d <- dist(barrios_conteo_indic2, method = "euclidean")
+
+## Usamos complete linkage como métrica entre clústers
+hc2 <- hclust(d, method = "complete" )
+
+## Dendograma
+plot(hc2, cex = 0.6, hang = -1)
+abline(h = 1.05, lty = 2)
+```
+Con un corte del dendograma alrededor de 1.05 se obtendrían más de 10 grupos porque existen una serie de barrios que se comportan como sujetos alejados de los demás barrios. Si agruparamos estos barrios en un grupo especial tendríamos 5 grupos de barrios de acuerdo a su accidentalidad. Por consiguiente se procede a mirar como se comportarían estos 5 grupos al realizar la agrupación mediante un método de capa única.
+
+#### K-Medias
+
+```{r}
+kmeans_barrios2 <- kmeans(barrios_conteo_indic2,5)
+clusters_barrios2 <- as.data.frame(kmeans_barrios2$centers)
+clusters_barrios2$total <- (clusters_barrios2$total*(max_total - min_total)) + min_total
+View(clusters_barrios2)
+```
+
+```{r}
+clusters_barrios2
+```
+En este modelo se pueden apreciar cosas interesantes en cuanto al porcentaje de gravedad por cada tipo de accidente. Por ejemplo, se puede apreciar que:
+- Los barrios donde existe una mayor accidentalidad en total (grupo 4) no es el grupo donde en promedio se presentan mayor cantidad de casos, los cuales, el resultado del accidente es un choque con al menos una persona herida o el grupo donde en promedio se presentan mayor número de fatalidades en choques.
+
+Al igual que en el enfoque anterior se procede a estimar el mejor número de clústers con base en el índice de Dunn y la suma de errores cuadráticos.
+
+```{r}
+k_test <- 3:25
+k_full2 <- lapply(k_test,FUN=function(k){
+  kmeans_barrios <- kmeans(barrios_conteo_indic2,k)
+  return(kmeans_barrios)
+})
+
+dunn_full2 <- sapply(k_full2,FUN = function(l){
+  dunn_index <- dunn(clusters = l$cluster, Data = barrios_conteo_indic2, method = "euclidean")
+  return(dunn_index)
+})
+
+data_dunn2 <- data.frame(k_test,dunn_full2)
+fig <- plot_ly(data_dunn2, x = ~k_test, y = ~dunn_full2, type = 'scatter', mode = 'lines')
+fig <- fig %>% layout(title = "Indice de Dunn por cantidad de clusters")
+fig
+```
+
+```{r}
+val_full2 <- sapply(k_full2,FUN = function(l){
+  value_rmse <- l$tot.withinss
+  return(value_rmse)
+})
+
+data_ss2 <- data.frame(k_test,val_full2)
+fig <- plot_ly(data_ss2, x = ~k_test, y = ~val_full2, type = 'scatter', mode = 'lines')
+fig <- fig %>% layout(title = "Suma de error cuadrático total por cantidad de clusters")
+fig
+```
+De acuerdo con estas gráficas se podrían utilizar valores como 7, 9 o 10 en el caso de la suma cuadrática del error, o 3 en el caso del índice de Dunn. Para este caso intentaremos con la opción de 7 grupos. 
+
+En general se ha percibido que existen un grupo de barrios con características muy diferentes a las de los demás barrios tal.
+
+#### DBSCAN
+
+Para terminar de corroborar esta información se procede a realizar el agrupamiento de los barrios usando el algoritmo DBSCAN que estima los grupos tomando en cuenta la densidad de los puntos. Dicho algoritmo es capaz de detectar grupos con cualquier tipo de forma.
+
+Primero se procede a estimar el radio y el número mínimo de puntos para utilizar el algoritmo.
+
+```{r}
+dbscan::kNNdistplot(barrios_conteo_indic2, k = 4)
+abline(h = 0.26, lty = 2)
+```
+
+Después de realizar varias pruebas con los valores para los parámetros de DBSCAN, se encuentra que podría utilizarse un radio de distancia de 0.26 y con una cantidad mínima de 4 puntos para que un punto dado se considere como un punto central. A continuación, se prueba la agrupación con DBSCAN:
+
+```{r}
+db2 <- fpc::dbscan(barrios_conteo_indic2, eps = 0.26, MinPts = 4)
+table(db2$cluster)
+```
+
+Al igual que con el caso de DBSCAN para las variables de conteo se encuentra que en este caso también se estiman 3 grupos diferentes para la accidentalidad en los barrios de Medellín. Ahora se calcula el índice de Dunn para comparar el desempeño de este modelo con el de K-Means.
+
+```{r}
+print("Índice de Dunn DBSCAN")
+dunn(clusters = db2$cluster, Data = barrios_conteo_indic2)
+```
+```{r}
+print("Índice de Dunn K-Means")
+dunn(clusters = k_full2[[7]]$cluster, Data = barrios_conteo_indic2)
+```
+Al comparar los resultados del índice de Dunn de los dos casos se ecnuentra que:
+- Al igual que en el enfoque con variables de conteo, el agrupamiento realizado por medio de DBSCAN mejora el desempeño presentado por K-Medias. Lo cual refuerza la idea de utilizar un método que no dependa en grupos con formas aproximadamentes circulares o elipsoidales.
+
+Mirando los dos enfoques utilizado, el primer enfoque eliminando algunas variables que no aportan variabilidad al conjunto de datos y adicionando algunas variables del segundo enfoque como tasas de mortalidad en los principales accidentes para poder realizar la agrupación. Así mismo se incluirán variables de población para ver si tienen algún efecto en la forma de la agrupación.
+
+### Primer enfoque depurado con variables adicionales
+
+De acuerdo a lo mencionado en el parráfo anterior, en este enfoque se utilizará como base la información del primer enfoque con la excepción de añadir variables relacionadas con tasas de mortalidad o de heridos en los principales indicadores, y otra variable como la población en cada uno de los barrios. Además en el primer enfoque se usa el total de accidentes en los 5 años analizados en cada barrio, lo cual puede sesgar un poco la forma de generación de los agrupamientos. Por esta razón, se utiliza el promedio de accidentalidad y de tasas por cada uno de los años, con el objetivo de que los datos no se vean influenciados por un año con un año con comportamiento anormal sino que sea la tendencia central del comportamiento por barrio.
+
+Primero, se estiman los indicadores.
+
+```{r}
+barrios_year <- accidentes %>%
+  select(NOMBRE_BARRIO,PERIODO,CLASE,GRAVEDAD) %>%
+  group_by(NOMBRE_BARRIO,PERIODO,CLASE,GRAVEDAD) %>%
+  summarize(conteo = n())
+head(barrios_year)
+```
+Ahora se calcula el promedio por año.
+
+```{r}
+barrios_year_full <- barrios_year %>%
+  group_by(NOMBRE_BARRIO,CLASE,GRAVEDAD) %>%
+  summarize(conteo_mean = mean(conteo))
+head(barrios_year_full)
+```
+
+Habiendo calculado la información del promedio de accidentes en clase y gravedad para cada barrio por todos los años, se procede a llevar esta tabla al formato wide y allí sacar los indicadores que no encontramos relevantes para el estudio. Para empezar sacaremos todos los accidentes que dicen otros, ya que al ser una categoría tan ambigua es difícil determinar cual sería el plan de acción donde ocurran muchos accidentes de este estilo, porque en realidad no se tiene conocimiento sobre que tipo de accidentes son. Así mismo, se exluyen aquellos que cuya clase es volcamiento y caída ocupante, ya que también es difícil preveer un accidente de este estilo y que medidas podrían contrarrestarlo.
+
+```{r}
+barrios_year_full <- barrios_year_full %>%
+  filter(CLASE %in% c("Atropello","Choque"))
+barrios_year_full2 <- barrios_year_full
+head(barrios_year_full)
+```
+Las otras variables que no se consideran importantes se remueven en la siguiente sección después de llevar los datos al formato wide.
+
+```{r}
+barrios_year_full <- barrios_year_full %>%
+  mutate(indicador = paste(CLASE,GRAVEDAD,sep="_"))
+barrios_year_full <- barrios_year_full[,c("NOMBRE_BARRIO","indicador","conteo_mean")]
+barrios_mean <- barrios_year_full %>%
+  pivot_wider(values_from="conteo_mean",names_from="indicador",values_fill = 0)
+head(barrios_mean)
+```
+Para mirar las variables que se eliminarán, se a revisará la desviación estándar de cada variable para determinar la variabilidad que aportan al conjunto de datos.
+
+```{r}
+print("Desviación estándar")
+sapply(barrios_mean[2:6],sd)
+print("Media")
+sapply(barrios_mean[2:6],mean)
+```
+Según estos podría eliminarse toda variable que presente una desviación estándar y una media inferior a 1, pero se considera que atropello muerto y choque muerto son variables relevantes para determinar el plan de acción porque son de los accidentes con mayor frecuencia. 
+
+Ahora se agregan las variables adicionales que se incluyeron en el segundo escenario. Para esto se calcula el promedio de los accidentes por cada clase de accidente computándolos después con las tasas para cruzarlos con la información que ya se tiene de la cantidad promedio por barrio. 
+Ya obtenida la cantidad media por todos los años para cada accidente y cada barrio solo es necesario computar el total.
+
+```{r}
+barrios_total_year <- accidentes %>%
+  select(NOMBRE_BARRIO,PERIODO,CLASE) %>%
+  group_by(NOMBRE_BARRIO,PERIODO,CLASE) %>%
+  summarize(conteo = n())
+head(barrios_total_year)
+```
+```{r}
+## Computamos el promedio de accidentes por clase de accidente
+barrios_total_full <- barrios_total_year %>%
+  group_by(NOMBRE_BARRIO,CLASE) %>%
+  summarize(conteo_mean = mean(conteo))
+
+## Cruzamos con el promedio por clase y gravedad
+barrios_total_year <- merge(barrios_year_full2,barrios_total_full,by = c("NOMBRE_BARRIO","CLASE"),all.x=TRUE)
+
+## Dejamos solo los accidentes que nos interesan en su tasa, calculamos la tasa y concatenamos el nombre del indicador
+barrios_total_year <- barrios_total_year %>%
+  filter(CLASE %in% c("Atropello","Choque")) %>%
+  mutate(perc = conteo_mean.x/conteo_mean.y,
+         indicador = paste("Tasa",CLASE,GRAVEDAD,sep="_"))
+barrios_total_year <- barrios_total_year[,c("NOMBRE_BARRIO","indicador","perc")]
+head(barrios_total_year)
+```
+```{r}
+## Lo llevamos a formato wide
+barrios_total_indic <- barrios_total_year %>%
+  pivot_wider(values_from="perc",names_from="indicador",values_fill = 0)
+print("Desviación estándar")
+sapply(barrios_total_indic[2:6],sd)
+print("Media")
+sapply(barrios_total_indic[2:6],mean)
+```
+Se dejará únicamente las tasas de choque herido, tasa choque muerto y tasa atropello muerto, ya que los demás índices son el complemento de las tasas mencionadas.
+
+```{r}
+barrios_total_indic <- barrios_total_indic[,c("NOMBRE_BARRIO","Tasa_Choque_HERIDO","Tasa_Choque_MUERTO","Tasa_Atropello_MUERTO")]
+```
+En general las variables se han extraído con el criterio desarrollado hasta ahora. Finalmente, se añaden al conjunto con las demás variables.
+
+```{r}
+barrios_mean <- merge(barrios_mean,barrios_total_indic,by="NOMBRE_BARRIO",all.x=TRUE)
+head(barrios_mean)
+```
+
+```{r}
+row.names(barrios_mean) <- barrios_mean$NOMBRE_BARRIO
+barrios_mean <- barrios_mean[,-1]
+
+max_list <- list()
+min_list <- list()
+
+for(i in 1:5){
+  max_total <- max(barrios_mean[,i])
+  min_total <- min(barrios_mean[,i])
+  barrios_mean[,i] <- (barrios_mean[,i] - min_total)/(max_total - min_total)
+  max_list[[i]] <- max_total
+  min_list[[i]] <- min_total
+}
+
+head(barrios_mean)
+```
+
+Con esta información ya puede iniciarse el proceso de agrupamiento. Este proceso lo realizará con DBSCAN ya que es el que mejor resultados ha arrojado hasta el momento. Sin embargo, se ensayará con K-medias y agrupamiento jerárquico, para determinar el mejor modelo con base al índice de Dunn.
+
+Primero se  determinan los parámetro del modelo; para ello se probará con una rejilla de valores posibles de K (para el algoritmo de vecinos más cercanos) y después con cada K se estimará el valor medio del radio a utilizar para determinar la densidad. Es decir, se probará con K = 3 hasta K = 10 y se continua anotando los valores de cada uno de los radios para después seleccionar el modelo que tenga el mayor índice de Dunn.
+
+```{r}
+## Definir función para pasar la gráfica para determinar el radio con plotly
+plotly_knn <- function(distancias, K){
+  distancias <- distancias[order(distancias)]
+  x <- seq_along(distancias)
+  datos <- data.frame(x,distancias)
+  fig <- plot_ly(datos, x = ~x, y = ~distancias, type = 'scatter', mode = 'lines')
+  fig <- fig %>% layout(title = "Gráfica para determinar el radio a utilizar en DBSCAN",
+         xaxis = list(title = "Barrios ordenados por distancia"),
+         yaxis = list(title = paste("Distancia con",K,"vecinos")))
+  print(paste("Distancia con",K,"vecinos"))
+  return(fig)
+}
+
+## Grilla de valores
+k_values <- 3:10
+
+list_figures <- lapply(k_values, FUN = function(K){
+  k_distancias <- dbscan::kNNdist(barrios_mean, k = K)
+  return(plotly_knn(k_distancias,K))
+})
+
+fig <- subplot(list_figures,nrows = 4, shareX = TRUE,shareY = FALSE)
+
+fig
+```
+De acuerdo a las gráficas se han estimado los distintos valores del radio para cada uno de los K evaluados en la grilla.
+Con estos datos se procede a realizara la estimación de clústers para cada uno de los escenarios y compararlos para determinar cual configuración arroja el mejor índice de Dunn.
+
+```{r}
+## Valores de radios para cada uno de los puntos mínimos
+eps_values <- c(0.21,0.21,0.21,0.21,0.25,0.24,0.21,0.21)
+idx <- seq_along(eps_values)
+
+## Ahora procedemos a realizara las agrupaciones con DBSCAN
+list_dbscan <- lapply(idx,FUN = function(i){
+  return(fpc::dbscan(barrios_mean, eps = eps_values[i], MinPts = k_values[i]))
+})
+
+dunn_full3 <- sapply(list_dbscan,FUN = function(l){
+  dunn_index <- dunn(clusters = l$cluster, Data = barrios_mean)
+  return(dunn_index)
+})
+
+data_dunn3 <- data.frame(k_values,dunn_full3)
+fig <- plot_ly(data_dunn3, x = ~k_values, y = ~dunn_full3, type = 'scatter', mode = 'lines')
+fig <- fig %>% layout(title = "Indice de Dunn por cantidad de puntos")
+fig
+```
+De acuerdo a esta gráfica tener hasta 9 puntos dentro no afecta significativamente el desempeño del modelo, por esto se escogerá uno de loq eue tiene la menor cantidad de puntos y lo mejoraremos probando múltiples valores de epsilon (radio).
+
+```{r}
+db <- fpc::dbscan(barrios_mean, eps = 0.21, MinPts = 4)
+print(table(db$cluster))
+dunn(clusters = db$cluster, Data = barrios_mean)
+```
+Después de múltiples intentos, se llega a encontrar que esta es de las mejores configuraciones que podrían obtenerse con este algoritmo,7; razón por lo cual es la elegida a usarse con los resultados de otros modelos. Así mismo, se considera necesario revisar en detalle la salida del algoritmo para determinar su funcionalidad.
+
+```{r}
+db
+```
+
+```{r}
+barrios_mean2 <- barrios_mean
+
+## Añadimos etiqueta del grupo a cada uno de los barrios
+barrios_mean2$grupo <- db$cluster
+
+## Convertimos los datos a su escala original para mayor interpretabilidad
+for(i in 1:5){
+  barrios_mean2[,i] <- (barrios_mean2[,i] * (max_list[[i]] - min_list[[i]])) + min_list[[i]]
+}
+```
+
+
+Aquí se encuentra algo interesante, el resultado del agrupamiento hecho con DBSCAN arroja que existen 30 puntos que se consideran como puntos con ruido, por lo que en realidad el algoritmo encontró 2 grupos densos y un grupo adicional de puntos distantes que no concuerda con la información de los demás grupos. Esto puede traer resultados adversos a la hora del agrupamiento, ya que se pueden estar uniendo en un único grupo barrios muy diferentes con casos extremos donde hay pocos accidentes y así mismo casos con demasiados accidentes.
+
+```{r}
+db <- fpc::dbscan(barrios_mean, eps = 0.202, MinPts = 4)
+print(table(db$cluster))
+dunn(clusters = db$cluster, Data = barrios_mean)
+```
+```{r}
+db
+```
+
+La configuración con un radio de 0.21 arroja un mejor resultado en el índice de Dunn ya que agrupa en un solo clúster casi todos los puntos y deja en otros dos grupos puntos que se pueden considerar distantes. Al revisar los datos de los barrios arrojados por el agrupamiento de 3 clústers se encuentra que hay diferencias en los datos y que resultaría mejor dividir con un grupo adicional, tal y como lo hace la generación de 4 grupos. Así mismo, se percibe que en ambos casos existen puntos que se consideran ruido y son agrupados en el clúster 0. Es necesario revisar y asignar una etiqueta real con base en el comportamiento de estos puntos, ya que pueden ser barrios con una alta accidentalidad o una baja accidentalidad.
+
+Vamos a revisar cada uno de los grupos y determinar que pasos siguen en el análisis.
+
+```{r}
+barrios_mean2 <- barrios_mean
+
+## Añadimos etiqueta del grupo a cada uno de los barrios
+barrios_mean2$grupo <- db$cluster
+
+## Convertimos los datos a su escala original para mayor interpretabilidad
+for(i in 1:5){
+  barrios_mean2[,i] <- (barrios_mean2[,i] * (max_list[[i]] - min_list[[i]])) + min_list[[i]]
+}
+```
+
+Finalmente, para revisar estos resultados se comparan con el agrupamiento jerárquico.
+
+```{r}
+## Primero se computa la matriz de dissimilaridad
+d <- dist(barrios_mean, method = "euclidean")
+
+## Usamos complete linkage como métrica entre clústers
+hc3 <- hclust(d, method = "complete" )
+
+## Dendograma
+plot(hc3, cex = 0.6, hang = -1)
+abline(h = 1.5, lty = 2)
+```
+Si se corta el dendograma a una altura de 1.5 podría obtenerse 3 grupos diferentes para realizar los planes de acción de acuerdo a las características de los barrios en dichas zonas.
+
+```{r}
+grupos_hclust <- cutree(hc3,k=3)
+print(table(grupos_hclust))
+dunn(clusters = grupos_hclust, Data = barrios_mean)
+```
+
+En general tiene mejores resultados que K-Medias. Se probará con distintos grupos para determinar cual obtiene el mejor índice de Dunn.
+
+```{r}
+k_test <- 3:8
+k_full3 <- lapply(k_test,FUN=function(K){
+  grupos_hclust <- cutree(hc3,k=K)
+  return(grupos_hclust)
+})
+
+dunn_full3 <- sapply(k_full3,FUN = function(l){
+  dunn_index <- dunn(clusters = l, Data = barrios_mean)
+  return(dunn_index)
+})
+
+data_dunn3 <- data.frame(k_test,dunn_full3)
+fig <- plot_ly(data_dunn3, x = ~k_test, y = ~dunn_full3, type = 'scatter', mode = 'lines')
+fig <- fig %>% layout(title = "Indice de Dunn por cantidad de clusters")
+fig
+```
+Por los resultados encontrados en el DBSCAN se basa en este resultado como el modelo para el agrupamiento, ya que el clustering jerárquico tiene menor índice de Dunn.
+
+```{r}
+barrios_mean2[barrios_mean2$grupo == 0,]
+```
+
+En este grupo existen barrios con alta accidentalidad, así como barrios con muy baja accidentalidad, por lo que es necesario dividirlos y asignarlos en conjuntos de datos más coherentes.
+
+Revisaremos los demas grupos y luego dividiremos este primer grupo.
+
+```{r}
+## Segundo grupo
+barrios_mean2[barrios_mean2$grupo == 1,]
+```
+
+```{r}
+## Tercer grupo
+barrios_mean2[barrios_mean2$grupo == 2,]
+```
+
+```{r}
+## Cuarto grupo
+barrios_mean2[barrios_mean2$grupo == 3,]
+```
+
+Los grupos que tienen la etiqueta 1 y 2 parecen estar bien conformados. En ambos casos existen barrios con alta y baja accidentalidad, pero hay diferencias en las tasas de la gravedad originada por un accidente. El grupo con la etiqueta 3 son barrios con baja accidentalidad y bajas tasas en la gravedad del accidente. En este grupo se incluirán los datos provenientes del grupo 0 que tienen baja accidentalidad y baja tasa de gravedad.
+
+se ha identificado en el grupo 0 ciertos barrios que tienen bajos índices de accidentalidad y altas tasas de fatalidad, por lo que se ha decidido agrupar a todos aquellos barrios con menos de 50 accidentes en choque solo daños y donde alguno de sus tasas de fatalidad sea superior a 0.4.
+
+```{r}
+barrios_mean2$grupo[barrios_mean2$grupo == 0 & (barrios_mean2$Tasa_Atropello_MUERTO > 0.4 | barrios_mean2$Tasa_Choque_MUERTO > 0.4)] <- 4
+table(barrios_mean2$grupo)
+```
+
+Los barrios que tienen baja accidentalidad y tasas de fatalidad promedio serán incluidos en el grupo 2.
+
+```{r}
+barrios_mean2$grupo[barrios_mean2$grupo == 0 & barrios_mean2$`Choque_SOLO DAÑOS` < 50] <- 2
+table(barrios_mean2$grupo)
+```
+
+Los otros 20 casos presentes en el grupo 0 son casos en los que la accidentalidad es muy alta en cuanto a choques o que el ratio de heridos o muertos por choque es muy alta para la cantidad de accidentes que se dan en ese barrio, por esta razón se conserva esta configuración.
+
+Ahora con estos grupos apróximadamente homógeneos, se asignan etiquetas:
+
+* Grupo 0: Alta accidentalidad y alto ratio de accidentes con heridos o muertos.
+* Grupo 1: Baja o media accidentalidad pero sin fatalidades.
+* Grupo 2: Barrios con estadísticas promedio en cuanto tasas de fatalidad, heridos y ratio entre accidentes y personas heridas/muertas.
+* Grupo 3: Baja o media accidentalidad con alta tasa de heridos pero sin fatalidades en choques.
+* Grupo 4: Baja accidentalidad con alta tasa de fatalidad.
+
+Acá nos referimos a ratio a la relación entre la cantidad de accidentes que no involucran heridos o muertos versus la cantidad de accidentes que involucran heridos o muertos.
+
+De acuerdo a estas etiquetas se procede a graficar el mapa y proseguir con el análisis pertinente.
+
+```{r}
+barrios_mean2$etiqueta[barrios_mean2$grupo == 0] <- "Alta accidentalidad y ratio de heridos/muertos"
+barrios_mean2$etiqueta[barrios_mean2$grupo == 1] <- "Baja o media accidentalidad, sin fatalidades"
+barrios_mean2$etiqueta[barrios_mean2$grupo == 2] <- "Barrios con estadísticas promedio"
+barrios_mean2$etiqueta[barrios_mean2$grupo == 3] <- "Baja o media accidentalidad, alta tasa de heridos"
+barrios_mean2$etiqueta[barrios_mean2$grupo == 4] <- "Baja accidentalidad, alta tasa de fatalidad"
+barrios_mean2$NOMBRE_BARRIO <- row.names(barrios_mean2)
+```
+
+```{r}
+accidentes_year <- accidentes %>%
+  select(NOMBRE_BARRIO,PERIODO) %>%
+  group_by(NOMBRE_BARRIO,PERIODO) %>%
+  summarize(conteo = n())
+accidentes_total <- accidentes_year %>%
+  group_by(NOMBRE_BARRIO) %>%
+  summarize(conteo_mean = mean(conteo))
+
+accidentes_total$conteo_mean <- round(accidentes_total$conteo_mean)
+barrios_mean2 <- merge(barrios_mean2,accidentes_total,by="NOMBRE_BARRIO",all.x=TRUE)
+barrios_mean2$tasa_fatal_med <- (barrios_mean2$Tasa_Choque_MUERTO + barrios_mean2$Tasa_Atropello_MUERTO)/2
+```
+
+
+```{r}
+## Copia del spatial data frame
+barrios_med_mapa <- barrios_medellin
+
+## Sacar index para organizar luego los registros
+barrios_med_mapa@data$index <- as.integer(row.names(barrios_med_mapa@data))
+
+## Combinar el indicador con el data frame spatial para graficar en mapa
+barrios_med_mapa@data <- merge(barrios_med_mapa@data,barrios_mean2,by = "NOMBRE_BARRIO",all.x=TRUE)
+barrios_med_mapa@data <- barrios_med_mapa@data %>% arrange(index)
+barrios_med_mapa@data$grupo <- barrios_med_mapa@data$grupo + 1
+```
+
+Mapa
+
+```{r}
+labels <- sprintf(
+  "<strong>%s</strong><br/><strong>Grupo:</strong> <u>%s</u><br/><strong>%g</strong> accidentes promedio por año<br/><strong>%g</strong> accidentes que involucran heridos por año<br/><strong>%g</strong>&#37 de accidentes promedio con al menos un muerto",
+  barrios_med_mapa@data$NOMBRE_BARRIO, 
+  barrios_med_mapa@data$etiqueta, 
+  barrios_med_mapa@data$conteo_mean, round(barrios_med_mapa@data$Atropello_HERIDO + barrios_med_mapa@data$Choque_HERIDO), round(barrios_med_mapa@data$tasa_fatal_med * 100,1)
+) %>% lapply(htmltools::HTML)
+
+pal <- colorFactor(palette = c("#04258C","#CEF8FA","#85D0F0","#305FC2","#9B90E1"), 
+               levels = c("Alta accidentalidad y ratio de heridos/muertos", "Baja o media accidentalidad, sin fatalidades", "Barrios con estadísticas promedio",
+                          "Baja o media accidentalidad, alta tasa de heridos","Baja accidentalidad, alta tasa de fatalidad"))
+
+leaflet(barrios_med_mapa)%>% 
+  addTiles()  %>% 
+  setView(lat=6.247612, lng=-75.582932, zoom=11.5) %>%
+  addPolygons(color="#B4B3B6",weight = 1, fillOpacity = 0.9,opacity = 1, smoothFactor = 0.7, fillColor = ~pal(etiqueta),
+  highlight = highlightOptions(
+    weight = 3,
+    color = "#666",
+    fillOpacity = 0.8,
+    bringToFront = TRUE),
+  label = labels,
+  labelOptions = labelOptions(
+    style = list("font-weight" = "normal", padding = "3px 8px"),
+    textsize = "13px",
+    direction = "auto")) %>% 
+  addLegend(pal = pal, values = ~etiqueta, opacity = 0.7, title = "Grupo",
+            position = "topright")
+```
+
+# Planes de Acción.
+
+Partiendo de la base del agrupamiento, se tienen dos tipos de entornos con alta accidentalidad:
+
+  1. Avenida regional sentido Norte-Sur a la altura del barrio Santa Fé hasta el barrio Cristo Rey.
+  ![avenida regional](G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/analitica_predictiva/Reporte/avenida regional.png)
+  
+  Esta zona forma parte de la vía vertebra más importante de Medellín. Es una avenida de 4 carriles continuos, pensados para mantener una velocidad promedio de 80km, sin embargo por las condiciones de incremento del parque automotor del valle de Aburrá, es una vía que en horas pico, la velocidad no se acerca a establecida.
+  Además, es la vía usada por la mayoría de transporte pesado para atravesar la ciudad y transportar mercancías hacia el sur del País; razón por la cual se mantiene una constante exposición de este tipo de vehículos con motos y automóbiles pequeños.
+  Dada esta condición, se parte de una situación desfaborable para quienes toman esta ruta en vehículos de talla menor, especialmente las motos. 
+  Plan de acción: Destinar carril exclusivo para el transporte pesado y reestrición de carriles a orillas del río para motos.
+  
+  2. Avenida Guayabal altura Cristo Rey.
+  ![avenida guayabal](G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/analitica_predictiva/Reporte/guayabal altura Cristo Rey.png)
+  
+  La Avenida Guayabal a la altura de la Calle 4 Sur, es otro de los puntos con alta intesidad en la accidentalidad de los barrios Cristo Rey-Santa Fé. Como puede observarse en la imagen adjunta, es una zona que cuenta con costados comerciales y que aún así la recorren 4 carrilles en donde el promedio de velocidad es considerable. El hecho que sus alrededores estén sujetos a una constante entrada y salida de vehículos, puede provocar que el flujo de tráfico se vea estropeado y así el riesgo de accidentalidad sea alto.
+  Plan de acción: cercamiento del costado de la vía en los puntos donde se alcanza mayor velocidad en el tráfico.
+  
+  3. Zona centro de la ciudad, comenzando en Perpetuo Socorro-San Diego, hasta Prado.
+  ![colon](G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/analitica_predictiva/Reporte/Barrio Colon altura cll 41.png)
+
+(Barrio Colón)
+![colon](G:/Mi unidad/UNIVERSIDAD/ESPECIALIZACION/Analítica Predictiva/TRABAJO/analitica_predictiva/Reporte/Avenida Oriental altura San Antonio.png)
+  
+(Centro de Medellín San Antonio-Avenida Oriental)
+  
+  En comparación con el caso anterior, es la zona con más afluencia de personas, también en torno a la cual se reúne el mayor centro de comercio de la ciudad. Como puede verse en las imágenes, son sectores que cuenta con una señalización víal bien definida, sumándole el hecho de la amplitud de los carriles. Partiendo de esto, ¿qué puede explicar la accidentalidad en esta zona, sabiendo que en su mayoría está muy bien señalizada? Los peatones son clave para explicar la accidentalidad en este sector. 
+  Dada la gran afluencia de personas en esta parte de la ciudad, es muy común que el peatón se convierta en la mayor amenaza para la accidentalidad, ya no es la velocidad como en los casos citados anteriormente. 
+  Plan de acción: ampliación de las aceras en la vía de mayor fluidez de vehículos: la avenida oriental desde la calle 41 hasta la calle 57; regulación estricta de paraderos y zonas de taxis a través del diseño de zonas de bahías con mayor capacidad de albergamiento de vehículos de recogida de pasajeros.
+  
+# Modelamiento.
+
+En esta sección vamos a generar distintos modelos que predigan la cantidad de accidentes que van a ocurrir en el tiempo con base en una serie de características y teniendo en cuenta que el objetivo principal es predicir el número de accidentes por cada tipo de accidente que se puede presentar.
+
+La predicción se debe realizar a nivel diario, semanal y mensual. Se disponen de los datos desde el 2014 hasta el 2017 para el entrenamiento del modelo y el 2018 para validar los modelos acá realizados. 
+
+La idea es realizar una predicción o un pronóstico de la cantidad de accidentes que ocurren por cada uno de los barrios en el tiempo. Por esto, es necesario generar un conjunto de datos en el cual se tenga en cuenta la cantidad de accidentes por barrio. En este sentido, se usan dos conjuntos de datos. El primero tendrá toda la información por días con respecto a días especiales, y el segundo tendrá los indicadores de accidentalidad por barrio. Para más detalle de este procedimiento revisar el markdown [prediccion_modelo](https://github.com/jdgallegoq/analitica_predictiva/blob/master/Reporte/prediccion_modelo.Rmd)
+
+Los indicadores de accidentalidad que tendremos en cuenta son:
+
+1. Atropellos.
+2. Choques.
+3. Otros (que unen caida ocupante, volcamientos y otro).
+
+Estos indicadores se obtuvieron de acuerdo a su ocurrencia y su importancia. Con base en los resultados encontrados en el agrupamiento, se identificó que los choques y los atropellos son indicadores importantes que ayudan a definir la tendencia de accidentalidad en cada uno de los barrios. En el caso del indicador de otros, se agruparon las demás estadísticas de accidentalidad, ya que algunos de estos otros indicadores tenían poca ocurrencia.
+
+Después de alistar los conjuntos de datos y unirlos en uno solo, se obtiene el siguiente conjunto de datos.
+
+
+```{r}
+## Leer datos formato uno
+urlfile_m <- "https://raw.githubusercontent.com/jdgallegoq/analitica_predictiva/master/Reporte/accidentes_barrios_dias_F1.csv"
+accidentes_final <- read.csv(urlfile_m, fileEncoding = "ISO-8859-1")
+
+#accidentes_final <- read.csv("accidentes_barrios_dias_F1.csv",fileEncoding = "ISO-8859-1")
+head(accidentes_final)
+```
+
+Este conjunto de datos tiene cada variable de respuesta (Atropello, Choque y Otro) en columnas separadas. La información de los registros y las demás columnas son las características de ese día en específico con cada barrio.
+
+De acuerdo a lo identficado en el markdown con el procedimiento completo, se identificaron algunas variables que no eran relevantes en la identificación de la accidentalidad por barrio. Esta identificación se realizó a través del uso de un bosque aleatorio sobre un conjunto que no incluía los barrios por temas de capacidad computacional. 
+
+En la siguiente ejecución se remueven las variables que se identificaron como poco relevantes y se realizan dos procesos adicionales para que el conjunto de datos quede listo para el modelamiento:
+
+```{r}
+accidentes_final <- accidentes_final %>%
+  select(-VAC_MITAD_ANO,-VAC_DICIEMBRE)
+
+## Variable día mes
+accidentes_final$DIA_ID <- as.numeric(gsub(".+(..)$","\\1",accidentes_final$FECHA))
+print(summary(accidentes_final$DIA_ID))
+
+## Se eliminan caracteres propios del español
+accidentes_final$NOMBRE_BARRIO <- stringi::stri_trans_general(accidentes_final$NOMBRE_BARRIO,id="LATIN-ASCII")
+accidentes_final$DIA_NOMBRE <- stringi::stri_trans_general(accidentes_final$DIA_NOMBRE,id="LATIN-ASCII")
+
+head(accidentes_final)
+```
+
+En la anterior ejecución, se adicionó la variable con el identificativo del día en el mes, es decir el número del día de 1 hasta 31 en los casos que aplica. Así mismo, dado que muchos de los algoritmos probados no admiten caracteres diferentes a los del alfabeto inglés, fue necesario remover tildes y ñ de las variables que contenían estos caracteres para evitar problemas en el ajuste de los modelos.
+
+Así mismo, se divide el conjunto de datos en entrenamiento y validación, teniendo en cuenta los lineamientos del proyecto.
+
+```{r}
+## Separar conjuntos de datos
+accidentes_final_train <- accidentes_final %>%
+  filter(PERIODO != 2018)
+print(nrow(accidentes_final_train))
+
+accidentes_final_val <- accidentes_final %>%
+  filter(PERIODO == 2018) 
+print(nrow(accidentes_final_val))
+```
+
+En este punto, se debe aclarar que detrás del reporte formal que representa este documento, hemos realizado modelos para cada una de las 3 variables de respuesta con las siguientes técnicas:
+
+* Regresión lineal.
+* Regresión log-lin.
+* Regresión de Poisson.
+* Regresión binomial negativa.
+* Redes neuronales.
+* Regresión dinámica (modelando residuales con ARIMA).
+* Árboles de regresión.
+
+En este reporte se aborda el enfoque final utilizado por el equipo de trabajo en la predicción, ya que es el que presenta mejores resultados en la métrica de error cuadrático medio. Durante la ejecución de las demás técnicas se apreció una dificultad para poder predecir la accidentalidad (en especial en los indicadores de atropellos y otros) ya que los indicadores presentaban una gran cantidad de 0 y la mayoría de técnicas usadas en la regresión estimaban valores en un espacio continuo. Así mismo, la cantidad de valores en accidentes en cada día era reducida. A pesar de que el árbol fue el mejor modelo, la reducción del MSE no es tan drástica como se podría pensar, pero lo suficiente para ser escogido.
+
+# Predicción con árboles de regresión
+
+Retomando lo dicho, se utilizan los datos ya mencionados, que contienen alrededor de 500k registros con tres variables de respuesta, una para cada indicador definido en el proyecto. Estos indicadores son:
+
+* Número de choques de vehículos.
+* Número de accidentes que involucran un atropello de al menos un peatón
+* Número de otros accidentes (caída ocupante, volcamiento, incendio, etc.)
+
+La idea con los árboles de regresión radica en la cantidad de datos que tiene 0 y en realidad se tienen pocos valores de la cantidad de accidentes que pueden ocurrir en un día, y al ser una variable discreta, la predicción más acertada es de valores enteros. Una de las grandes ventajas de este modelo es que capaz de trabajar con datos altamente no lineales y dividirlos mediante una serie de reglas que permiten establecer una estimación puntual de cada subconjunto dividido.
+
+Con esta información, se divide el conjunto de datos original en tres conjuntos para entrenamiento y validación. Esto se realiza para evitar problemas con el ajuste del modelo.
+
+En la siguiente sección de código se crean 6 data frames diferentes, ya que inicialmente el modelo estaba arrojando un error por no incluir variables directamente en la fórmula de generación del modelo. Por esta razón, se decidió excluir las variables con las que el modelo estaba generando error.
+
+```{r}
+choque_final_train <- accidentes_final_train %>%
+    select(-DIA_MUJER,-DIA_MADRE.,-PRECIPITACION_PROM,-FECHA,-Atropello,-Otro)
+
+atropello_final_train <- accidentes_final_train %>%
+    select(-DIA_MUJER,-DIA_MADRE.,-PRECIPITACION_PROM,-FECHA,-Choque,-Otro)
+
+otro_final_train <- accidentes_final_train %>%
+    select(-DIA_MUJER,-DIA_MADRE.,-PRECIPITACION_PROM,-FECHA,-Choque,-Atropello)
+
+choque_final_val <- accidentes_final_val %>%
+    select(-DIA_MUJER,-DIA_MADRE.,-PRECIPITACION_PROM,-FECHA,-Atropello,-Otro)
+
+atropello_final_val <- accidentes_final_val %>%
+    select(-DIA_MUJER,-DIA_MADRE.,-PRECIPITACION_PROM,-FECHA,-Choque,-Otro)
+
+otro_final_val <- accidentes_final_val %>%
+    select(-DIA_MUJER,-DIA_MADRE.,-PRECIPITACION_PROM,-FECHA,-Choque,-Atropello)
+```
+
+Con estos datos se estiman los árboles de regresión de cada uno de los indicadores.
+
+```{r}
+## Árbol de regresión para choques
+tree_choque <- rpart(Choque ~ ., data=choque_final_train, method="anova",control=rpart.control(minsplit=50, cp=0.0001))
+#summary(tree_choque)
+
+tree_choque$variable.importance
+```
+
+```{r}
+y_train_choque <- predict(tree_choque, newdata = choque_final_train)
+mse_t_choque <- mean((choque_final_train$Choque - y_train_choque)^2)
+print(mse_t_choque)
+y_val_choque <- predict(tree_choque, newdata = choque_final_val)
+mse_tv_choque <- mean((choque_final_val$Choque - y_val_choque)^2)
+print(mse_tv_choque)
+((mse_tv_choque - mse_t_choque)/mse_t_choque)*100
+```
+
+Esta es la mejor configuración que se obtuvo al probar distintos parámetros para el modelo de choque. Se restalta el intento de realizar optimización de los hiperparámetros del modelo y no fue posible debido al alto costo computacional que este demanda al ser un conjunto de datos grande. Sin embargo, se encontró que este modelo es el que presenta el menor error cuadrático medio tanto en entrenamiento como en validación, razón por la cual se utilizará para las predicciones formales que se realizarán en la aplicación.
+
+Ahora el indicador de atropello.
+
+```{r}
+## Árbol de regresión para atropello
+tree_atropello <- rpart(Atropello ~ ., data=atropello_final_train, method="anova",control=rpart.control(minsplit=70, cp=0.0001))
+#summary(tree_atropello)
+
+tree_atropello$variable.importance
+```
+
+```{r}
+y_train_atropello <- predict(tree_atropello, newdata = atropello_final_train)
+mse_t_atropello <- mean((atropello_final_train$Atropello - y_train_atropello)^2)
+print(mse_t_atropello)
+y_val_atropello <- predict(tree_atropello, newdata = atropello_final_val)
+mse_tv_atropello <- mean((atropello_final_val$Atropello - y_val_atropello)^2)
+print(mse_tv_atropello)
+((mse_tv_atropello - mse_t_atropello)/mse_t_atropello)*100
+```
+
+Si bien este modelo no mejora significativamente las estadísticas de los demás modelos, es uno de los modelos más livianos y fáciles de trabajar debido a su estructura. Además, la forma en la que está diseñado permite más aplicaciones como la generación e identificación de reglas que permiten realizar un agrupamiento adicional de los barrios de la ciudad en cuanto a sus indicadores de accidentalidad. Además tiene un MSE de cambio porcentual menor al de los demás modelos.
+
+Finalmente, el modelo de otros accidentes.
+
+```{r}
+## Árbol de regresión para atropello
+tree_otro <- rpart(Otro ~ ., data=otro_final_train, method="anova",control=rpart.control(minsplit=70, cp=0.0001))
+#summary(tree_otro)
+
+tree_otro$variable.importance
+```
+
+```{r}
+y_train_otro <- predict(tree_otro, newdata = otro_final_train)
+mse_t_otro <- mean((otro_final_train$Otro - y_train_otro)^2)
+print(mse_t_otro)
+y_val_otro <- predict(tree_otro, newdata = otro_final_val)
+mse_tv_otro <- mean((otro_final_val$Otro - y_val_otro)^2)
+print(mse_tv_otro)
+((mse_tv_otro - mse_t_otro)/mse_t_otro)*100
+```
+
+A diferencia del anterior, en este modelo se puede percibir una mejora en el error cuadrático medio de la validación, por lo que también queda seleccionad como el modelo a utilizar para la predicción de la accidentalidad de otro tipo en la ciudad de Medellín. Los 3 modelos generados cumplen el tema de sobreajuste ya que ninguno supera el 15% de error porcentual entre las métricas de entrenamiento y validación. En este punto es de aclarar, que los modelos de atropello y otros aunque presentan variaciones porcentuales significativas ambas se encuentran por debajo de las métricas de entrenamiento por lo que, en teoría, no se puede hablar de sobreajuste. Lo que parece es que hay un comportamiento un poco diferente en el último año.
+
+Además de lo mencionado, se quiere dejar claro que no se realizó un modelo de bosque aleatorio debido a la alta capacidad computacional que este demenda y al tiempo de ejecución, por lo que se hicieron búsquedas de parámetros para dejar un buen modelo de árbol de regresión.
+
+Como era de esperar en la importancia de las variables, la variable que siempre predomina en la estimación de la cantidad de accidentes en la ciudad es el nombre del barrio. Tal y como se observó en el agrupamiento, los diferentes barrios se agrupan naturalmente con ciertas características en común, donde los barrios con vías principales son más propensos a sufrir mayor cantidad de accidentes.
+
+Para finalizar se deció utilizar las predicciones diarias para estimar la predicción por semana y mes. La forma en la que se procede es realizar las estimaciones diarias para el periodo seleccionado y a continuación sumar los dias necesarios para conformar la semana o el mes elegido, posterior a esto el valor será redondeado al número entero más cercano.
+
+En cuanto a los valores generados por el modelo, se observa que los valores contienen cifras decimales. Sin embargo, se está estimando la cantidad de accidentes que ocurren de cierto tipo en cada barrio. Dado esto, también es necesario generar algún tipo de estrategia para hacer las aproximaciones de las estimaciones a un número entero. Para definir esta estrategia se mira el comportamiento de los valores reales que son diferentes de 0 y las predicciones realizadas, y el comportamiento de los valores reales que fueron 0 y sus respectivas predicciones.
+
+```{r}
+## Revisión de valores en choques
+choques_full <- data.frame(choque_final_train$Choque,y_train_choque)
+
+## Vamos a discretizar en rangos los valores predichos
+choques_full$ranges <- cut(choques_full$y_train_choque,breaks = 200)
+
+## Agrupar
+choques_full_group <- choques_full %>%
+  group_by(ranges,choque_final_train.Choque) %>%
+  summarize(cuenta = n())
+
+choques_ranges <- choques_full %>%
+  group_by(ranges) %>%
+  summarize(cuenta_total = n())
+
+choques_full_group <- merge(choques_full_group,choques_ranges,by="ranges",all.x=TRUE)
+choques_full_group$perc <- choques_full_group$cuenta/choques_full_group$cuenta_total
+choques_full_group_f <- choques_full_group %>%
+  select(-cuenta,-cuenta_total) %>%
+  pivot_wider(values_from="perc",names_from="choque_final_train.Choque",values_fill = 0)
+
+names(choques_full_group_f)[2:13] <- paste("value",names(choques_full_group_f)[2:13],sep="_")
+head(choques_full_group_f)
+```
+```{r}
+## Calculo del valor medio esperado
+choques_full_group$medio_range <- choques_full_group$choque_final_train.Choque * choques_full_group$perc
+choques_full_group2 <- choques_full_group %>%
+  group_by(ranges) %>%
+  summarize(medio_range = sum(medio_range))
+```
+
+```{r}
+fig_choques <- plot_ly(choques_full_group_f, 
+                       x = ~ranges, y = ~value_0, type = 'bar', name = 'value_0')
+fig_choques <- fig_choques %>% add_trace(y = ~value_1, name = 'value_1')
+fig_choques <- fig_choques %>% add_trace(y = ~value_2, name = 'value_2')
+fig_choques <- fig_choques %>% add_trace(y = ~value_3, name = 'value_3')
+fig_choques <- fig_choques %>% add_trace(y = ~value_4, name = 'value_4')
+fig_choques <- fig_choques %>% add_trace(y = ~value_5, name = 'value_5')
+fig_choques <- fig_choques %>% add_trace(y = ~value_6, name = 'value_6')
+fig_choques <- fig_choques %>% add_trace(y = ~value_7, name = 'value_7')
+fig_choques <- fig_choques %>% add_trace(y = ~value_8, name = 'value_8')
+fig_choques <- fig_choques %>% add_trace(y = ~value_9, name = 'value_9')
+fig_choques <- fig_choques %>% add_trace(y = ~value_10, name = 'value_10')
+fig_choques <- fig_choques %>% add_trace(y = ~value_11, name = 'value_11')
+fig_choques <- fig_choques %>% layout(yaxis = list(title = 'Count'), barmode = 'stack')
+
+fig_choques
+```
+
+De esta forma, es posible apreciar como se distribuyen los valores en entrenamiento de las respectivas predicciones. Con base en el valor medio esperado, obtenido mediante el porcentaje de valores de cierta cantidad que caen en cierto rango, por lo que se decide aproximar el valor medio de cada rango a su entero más cercano y de acuerdo a los rangos de valores definidos vamos se aproximan los valores que caigan en ese rango al entero definido por el valor medio esperado.
+
+Se realiza el mismo procedimiento para los demás modelos.
+
+```{r}
+## Revisión de valores en atropellos
+atropellos_full <- data.frame(atropello_final_train$Atropello,y_train_atropello)
+
+## Vamos a discretizar en rangos los valores predichos
+atropellos_full$ranges <- cut(atropellos_full$y_train_atropello,breaks = 200)
+
+## Agrupar
+atropellos_full_group <- atropellos_full %>%
+  group_by(ranges,atropello_final_train.Atropello) %>%
+  summarize(cuenta = n())
+
+atropellos_ranges <- atropellos_full %>%
+  group_by(ranges) %>%
+  summarize(cuenta_total = n())
+
+atropellos_full_group <- merge(atropellos_full_group,atropellos_ranges,by="ranges",all.x=TRUE)
+atropellos_full_group$perc <- atropellos_full_group$cuenta/atropellos_full_group$cuenta_total
+atropellos_full_group_f <- atropellos_full_group %>%
+  select(-cuenta,-cuenta_total) %>%
+  pivot_wider(values_from="perc",names_from="atropello_final_train.Atropello",values_fill = 0)
+
+names(atropellos_full_group_f)[2:6] <- paste("value",names(atropellos_full_group_f)[2:6],sep="_")
+
+## Calculo del valor medio esperado
+atropellos_full_group$medio_range <- atropellos_full_group$atropello_final_train.Atropello * atropellos_full_group$perc
+atropellos_full_group2 <- atropellos_full_group %>%
+  group_by(ranges) %>%
+  summarize(medio_range = sum(medio_range))
+
+fig_atropellos <- plot_ly(atropellos_full_group_f, 
+                       x = ~ranges, y = ~value_0, type = 'bar', name = 'value_0')
+fig_atropellos <- fig_atropellos %>% add_trace(y = ~value_1, name = 'value_1')
+fig_atropellos <- fig_atropellos %>% add_trace(y = ~value_2, name = 'value_2')
+fig_atropellos <- fig_atropellos %>% add_trace(y = ~value_3, name = 'value_3')
+fig_atropellos <- fig_atropellos %>% layout(yaxis = list(title = 'Count'), barmode = 'stack')
+
+fig_atropellos
+
+```
+Se ejecuta el mismo procedimiento descrito con el modelo de otros accidentes.
+
+```{r}
+## Revisión de valores en otros
+otros_full <- data.frame(otro_final_train$Otro,y_train_otro)
+
+## Vamos a discretizar en rangos los valores predichos
+otros_full$ranges <- cut(otros_full$y_train_otro,breaks = 200)
+
+## Agrupar
+otros_full_group <- otros_full %>%
+  group_by(ranges,otro_final_train.Otro) %>%
+  summarize(cuenta = n())
+
+otros_ranges <- otros_full %>%
+  group_by(ranges) %>%
+  summarize(cuenta_total = n())
+
+otros_full_group <- merge(otros_full_group,otros_ranges,by="ranges",all.x=TRUE)
+otros_full_group$perc <- otros_full_group$cuenta/otros_full_group$cuenta_total
+otros_full_group_f <- otros_full_group %>%
+  select(-cuenta,-cuenta_total) %>%
+  pivot_wider(values_from="perc",names_from="otro_final_train.Otro",values_fill = 0)
+
+names(otros_full_group_f)[2:9] <- paste("value",names(otros_full_group_f)[2:9],sep="_")
+
+## Calculo del valor medio esperado
+otros_full_group$medio_range <- otros_full_group$otro_final_train.Otro * otros_full_group$perc
+otros_full_group2 <- otros_full_group %>%
+  group_by(ranges) %>%
+  summarize(medio_range = sum(medio_range))
+
+fig_otros <- plot_ly(otros_full_group_f, 
+                       x = ~ranges, y = ~value_0, type = 'bar', name = 'value_0')
+fig_otros <- fig_otros %>% add_trace(y = ~value_1, name = 'value_1')
+fig_otros <- fig_otros %>% add_trace(y = ~value_2, name = 'value_2')
+fig_otros <- fig_otros %>% add_trace(y = ~value_3, name = 'value_3')
+fig_otros <- fig_otros %>% add_trace(y = ~value_4, name = 'value_4')
+fig_otros <- fig_otros %>% add_trace(y = ~value_5, name = 'value_5')
+fig_otros <- fig_otros %>% add_trace(y = ~value_6, name = 'value_6')
+fig_otros <- fig_otros %>% add_trace(y = ~value_8, name = 'value_8')
+fig_otros <- fig_otros %>% layout(yaxis = list(title = 'Count'), barmode = 'stack')
+
+fig_otros
+```
+
+Cabe recordar que para el caso de valores agrupados como semana o mes vamos a sumar los valores diarios que arroja el modelo y los vamos a sumar para completar la unidad de tiempo requerida (semana, mes) y luego dicho resultado de la suma será redondeado a su valor entero más cercano.
+
+En la siguiente ejecución de código se obtiene el valor entero al que se redondeará cada predicción realizada de acuerdo a lo encontrado en el modelo entrenado.
+
+```{r}
+choques_full_group2$estimado <- round(choques_full_group2$medio_range)
+atropellos_full_group2$estimado <- round(atropellos_full_group2$medio_range)
+otros_full_group2$estimado <- round(otros_full_group2$medio_range)
+```
+
+Con estos rangos de valores se redondean los resultados del árbol de regresión. Para los casos donde el valor de la estimación exceda el último rango definido se aproxima al valor medio entero del último rango definido.
+
+Se obtienen el valor mínimo y máximo de los intervalos para la comparación.
+
+```{r}
+## Obtener mínimo
+extrae_min <- function(x){
+  min <- gsub("\\((.+),.+","\\1",x)
+  return(min)
+}
+
+choques_full_group2$min <- as.numeric(extrae_min(choques_full_group2$ranges))
+atropellos_full_group2$min <- as.numeric(extrae_min(atropellos_full_group2$ranges))
+otros_full_group2$min <- as.numeric(extrae_min(otros_full_group2$ranges))
+
+## El máximo será el mínimo valor del siguiente intervalo
+choques_full_group2$max <- lead(choques_full_group2$min)
+atropellos_full_group2$max <- lead(atropellos_full_group2$min)
+otros_full_group2$max <- lead(otros_full_group2$min)
+
+## Al registro que tiene NA en el máximo se le asigna un número muy grande, lo que denota
+## que todo número mayor a los observados caerá en el último rango
+choques_full_group2$max[is.na(choques_full_group2$max)] <- 1000
+atropellos_full_group2$max[is.na(atropellos_full_group2$max)] <- 1000
+otros_full_group2$max[is.na(otros_full_group2$max)] <- 1000
+```
+
+Finalmente, se almacenan los modelos generados y los datos de aproximación para realizar las predicciones sobre la aplicación diseñada.
+
+# Referencias.
+Las 20 ciudades más pobladas de Colombia. Libretilla. (2020). Recuperado el 1 de Septiembre, 2020, de: <https://libretilla.com/ciudades-mas-grandes-de-colombia-por-poblacion/>.
+Broseta, A., 2020. Mejores Ciudades Para Vivir En Colombia En 2020. Rankia. Recuperado el 1 de Septiembre, 2020, de: <https://www.rankia.co/blog/mejores-opiniones-colombia/3120172-mejores-ciudades-para-vivir-colombia-2020>
+Google. (2019). Calles de Medellín. Recuperado el 1 de Septiembre, 2020, de: <https://www.google.com/maps/>
+
+
+ 
