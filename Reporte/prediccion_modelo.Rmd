@@ -1,0 +1,1068 @@
+---
+title: "prediccion_modelo"
+author: "Jhon Parra"
+date: "8/29/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plotly)
+library(leaflet)
+library(tidyr)
+library(dplyr)
+library(rgdal)
+library(reshape2)
+library(lubridate)
+library(rgdal)
+library(stringi)
+library(randomForest)
+library(plotly)
+library(MASS)
+library(caret)
+library(tfdatasets)
+library(keras)
+library(tsibble)
+library(fable)
+```
+
+# Accidentalidad en Medellín
+
+Este documento tiene la finalidad de describir uno de los intentos de la predicción de la accidentalidad del proyecto final de la materia de analítica predictiva.
+
+## Predicción
+
+La predicción se debe realizar a nivel diario, semanal y mensual. Disponemos de los datos desde el 2014 hasta el 2017 para el entrenamiento del modelo y el 2018 para validar los modelos acá realizados. 
+
+La idea es realizar una predicción o un pronóstico de la cantidad de accidentes que ocurren por cada uno de los barrios en el tiempo. Por esto, es necesario generar un conjunto de datos en el cual se tenga en cuenta la cantidad de accidentes por barrio. En este sentido usaremos dos conjuntos de datos. El primero tendrá toda la información por días con respecto a la precipitación, días especiales, y el segundo tendrá los indicadores de accidentalidad por barrio.
+
+Los indicadores de accidentalidad que tendremos en cuenta son:
+
+1. Atropellos.
+2. Choques.
+3. Otros (que unen caida ocupante, volcamientos y otro).
+
+Primero vamos a cargar los datos de los días.
+
+```{r}
+accidentes_dia <- read.csv2("D:/jhoparra/2020-1/Predictiva/analitica_predictiva/accidentes_diarios-28-08-2020.csv",fileEncoding = "ISO-8859-1")
+head(accidentes_dia)
+```
+Listo, en términos generales este documento se abordará de la siguiente manera:
+
+1. Agregar variables de consecutivo de día.
+2. Cargar datos a nivel de barrio y unir conjuntos.
+3. Selección de características para los modelos.
+4. Separar conjunto de datos en entrenamiento y validación.
+5. Generar modelos y validar.
+6. Selección de mejor modelo y selección de parámetros.
+7. Guardar modelos.
+
+Dentro de las etapas que incluimos no se encuentra la creación o adición de variables así como el análisis exploratorio, ya que dicho trabajo se abordó en otro notebook.
+
+En general, la estructura actual de los datos es bastante funcional para un análisis exploratorio o inclusive para un análisis de agrupamiento e inclusive para hacer la predicción de cada variable individualmente como el caso de atropellos, choques, caida ocupante, volcamiento y otros. Sin embargo, este enfoque haría que se generara un modelo para cada variable de forma independiente, por esta razón se examinará el enfoque de tener los datos en formato wide y el enfoque con una única variable de respuesta y haciendo que cada una de las variables de tipo de accidente se vuelvan una variable independiente.
+
+### 1. Agregar variables.
+
+Antes de realizar cambios al conjunto de datos dependiendo del enfoque, añadiremos una variable que puede ser útil en este ejercicio, ya que básicamente este es un ejercicio de pronóstico de una variable estocástica, es decir, una variable que cambia atada a un componente temporal, se tendrá el consecutivo del día como una variable, es decir el 01/01/2014 será el día 1, el 02/01/2014 será el día 2 y así sucesivamente en caso dado de que exista algún componente de tendencia o estacionalidad con respecto a los días.
+
+Esto se realizará sobre el conjunto de datos por día para después unirlo con el conjunto de datos por barrio.
+
+```{r}
+accidentes_dia$DIA_ID <- as.numeric(gsub(".+(..)$","\\1",accidentes_dia$FECHA))
+summary(accidentes_dia$DIA_ID)
+```
+En este sentido, se podría agregar una variable que tenga una especie de desfase por si los accidentes se encuentran autocorrelacionados. Sin embargo, primero vamos a explorar los resultados de los modelos bajo esta estructura y si es necesario incluimos variables de desfase. Inclusive si observamos que es coherente podríamos utilizar un método clásico de pronóstico como ARIMA.
+
+Finalmente, se agregará una variable que indique si el día en cuestión es festivo o no. Para esto usaremos un conjunto de datos adicional que indica las fechas de los días que fueron festivos en esos años
+
+```{r}
+festivos <- read.table("D:/jhoparra/2020-1/Predictiva/analitica_predictiva/festivos_2014_2018.txt",header=TRUE)
+head(festivos)
+```
+Se convierte en formato fecha con lubridate y luego se lleva a string para hacer el cruce con el dataset completo.
+
+```{r}
+festivos$FESTIVO <- 1
+festivos$Festivos <- mdy(festivos$Festivos)
+festivos$Festivos <- as.character(festivos$Festivos)
+head(festivos)
+```
+
+Convertimos columna del dataset original en string para garantizar el cruce y realizamos el cruce.
+
+```{r}
+accidentes_dia$FECHA <- as.character(accidentes_dia$FECHA)
+accidentes_dia <- merge(accidentes_dia,festivos,by.x="FECHA",by.y="Festivos",all.x=TRUE)
+head(accidentes_dia)
+```
+Ahora rellenamos los datos faltantes en la columna festivo por 0.
+
+```{r}
+accidentes_dia$FESTIVO[is.na(accidentes_dia$FESTIVO)] <- 0
+summary(accidentes_dia$FESTIVO)
+```
+Dado que originalmente este conjunto de datos contiene información de los accidentes también, vamos a quitar estas columnas que serán traídas de los datos por barrio.
+
+```{r}
+accidentes_dia2 <- accidentes_dia %>%
+  dplyr::select(-ACCIDENTES,-MUERTOS,-DANOS,-HERIDOS)
+accidentes_dia <- accidentes_dia %>%
+  dplyr::select(-ACCIDENTES,-ATROPELLOS,-CHOQUES,-CAIDAD_OCU,-VOLCAMIENTOS,-OTRO,-MUERTOS,-DANOS,-HERIDOS)
+head(accidentes_dia)
+```
+
+
+Listo con esta información podemos proseguir a la siguiente fase.
+
+## 2. Datos por barrio
+
+Esta sección tiene como objetivo cargar los datos original procesados y agrupar los datos para dejarlos por barrio y por cada uno de los tres indicadores planteados en el inicio. Esta información luego será unida con la información de los días para generar el conjunto de datos final para realizar la predicción.
+
+Primero cargamos los datos originales.
+
+```{r}
+accidentes <- read.csv("D:/jhoparra/2020-1/Predictiva/analitica_predictiva/accidentes3.csv",fileEncoding = "ISO-8859-1")
+head(accidentes)
+```
+
+```{r}
+summary(accidentes)
+```
+
+```{r}
+table(accidentes$GRAVEDAD)
+```
+```{r}
+table(accidentes$CLASE)
+```
+
+Dado que la clase del accidente puede proveer con estadísticas importantes para realizar el agrupamiento de barrios vamos a unificar para tener categorías con una cantidad importante de registros. Por esta razón los que están en blanco y en incendio serán agregadas a Otro, en tanto que choque y atropello se agregará a los datos de choque.
+
+```{r}
+accidentes <- accidentes %>%
+  rename(BARRIO_1 = BARRIO)
+accidentes$CLASE <- gsub("Incendio","Otro",accidentes$CLASE)
+accidentes$CLASE <- gsub("Choque y Atropello","Choque",accidentes$CLASE)
+accidentes$CLASE[accidentes$CLASE == ""] <- "Otro"
+table(accidentes$CLASE)
+```
+
+Ahora dejamos solo tres indicadores, choque, atropello y otros.
+
+```{r}
+accidentes$CLASE <- gsub("Caida ocupante","Otro",accidentes$CLASE)
+accidentes$CLASE <- gsub("Volcamiento","Otro",accidentes$CLASE)
+table(accidentes$CLASE)
+```
+Ahora realizamos el mismo procedimiento que se realizó con los datos para el agrupamiento, en el cual con las coordenadas determinabamos el nombre del barrio del accidente.
+
+La información de este geojson fue descargada de este [portal](https://geomedellin-m-medellin.opendata.arcgis.com/datasets/limite-barrio-vereda-catastral).
+
+```{r}
+Sys.setlocale(locale = "Spanish")
+barrios_medellin <- readOGR("D:/jhoparra/2020-1/Predictiva/analitica_predictiva/Mapa/Limite_Barrio_Vereda_Catastral.geojson",
+                            stringsAsFactors = FALSE,use_iconv = TRUE,encoding = "UTF-8")
+head(barrios_medellin@data)
+```
+Para realizar este proceso es necesario que los puntos provenientes de la accidentalidad se encuentren en la misma proyección de los polígonos.
+
+```{r}
+accidentes_spatial <- accidentes
+coordinates(accidentes_spatial) <- ~LONGITUD+LATITUD
+proj4string(accidentes_spatial) <- proj4string(barrios_medellin)
+```
+Ahora utilizamos la función `over` de la librería `sp` para determinar los poligonos en los que se encuentra cada punto, este proceso nos ayudará para dejar los nombres de los barrios estándar para hacer el mapa más adelante.
+
+```{r}
+## Código para determinar en cuáles barrios se encuentran los puntos
+contains_barrio <- over(accidentes_spatial, barrios_medellin)
+```
+
+Con esta información ahora añadimos la información del geojson al data frame para poder identificar los puntos que se encuentran sin barrio.
+
+```{r}
+accidentes <- cbind(accidentes,contains_barrio)
+head(accidentes)
+```
+
+```{r}
+table(is.na(accidentes$NOMBRE_BARRIO))
+```
+Siguen existiendo 515 registros con valores faltantes.
+
+```{r}
+accidentes_na <- accidentes[is.na(accidentes$NOMBRE_BARRIO),]
+```
+
+Viendo los registros y analizándolos podemos ver que estos registros se encuentran por fuera de lo que se considera Medellín de acuerdo a las delimitaciones encontradas en el geojson de la alcaldía, por esta razón se eliminarán del conjunto de datos.
+
+```{r}
+accidentes <- accidentes[!is.na(accidentes$NOMBRE_BARRIO),]
+table(is.na(accidentes$NOMBRE_BARRIO))
+```
+
+Con esta información podemos proceder a convertir los datos en el formato deseado por barrio e indicador. Para esto, primero vamos a agrupar los datos por día, barrio e indicador y luego vamos a llevarlo a un formato wide para después realizar el cruce debido con los días.
+
+```{r}
+accidentes_barrio <- accidentes %>%
+  dplyr::select(FECHA,NOMBRE_BARRIO,CLASE) %>%
+  dplyr::group_by(FECHA,NOMBRE_BARRIO,CLASE) %>%
+  dplyr::summarize(N_ACCIDENTES = n())
+head(accidentes_barrio)
+```
+En este momento este conjunto de datos cuenta con 162951 registros. Sin embargo, no se tienen en cuenta combinaciones donde ese día no hubo cierto tipo de accidente en un barrio. Esto lo vamos a cambiar al convertir este conjunto de datos en formato wide.
+
+```{r}
+accidentes_barrio2 <- accidentes_barrio %>%
+  pivot_wider(values_from="N_ACCIDENTES",names_from="NOMBRE_BARRIO",values_fill = 0)
+head(accidentes_barrio2)
+```
+Ahora llevamos esta información a su forma original con la diferencia que cada barrio va a tener algún valor todos los días (inclusive si este valor es 0).
+
+```{r}
+accidentes_barrio2 <- accidentes_barrio2 %>%
+  melt(id.vars = c("FECHA","CLASE"),
+       variable.name = "NOMBRE_BARRIO",value.name="N_ACCIDENTES")
+head(accidentes_barrio2)
+```
+Finalmente, vamos a convertir las categorías de la columna clase en columnas independientes.
+
+```{r}
+accidentes_barrio <- accidentes_barrio2 %>%
+  pivot_wider(values_from="N_ACCIDENTES",names_from="CLASE",values_fill = 0)
+head(accidentes_barrio)
+```
+Ahora podemos realizar el cruce del conjunto de datos por día con el conjunto de datos por barrio.
+
+```{r}
+accidentes_barrio$FECHA <- as.character(accidentes_barrio$FECHA)
+accidentes_final <- merge(accidentes_dia,accidentes_barrio,by="FECHA",all = TRUE)
+head(accidentes_final)
+```
+Listo, en este punto tenemos dos opciones.
+
+1. Dejamos los datos en este forma es decir cada variable de respuesta (Atropello, Choque y Otro) se dejan en columnas separadas.
+2. Convertimos todo este conjunto en un formato en el cual solo exista una variable de respuesta (N_ACCIDENTES) y una variable que relacione los indicadores en una sola columna.
+
+Por términos de practicidad vamos a generar ambos conjuntos de datos y a trabajar primero con uno y luego con el restante.
+
+```{r}
+## Escribir conjunto de datos en el formato actual
+write.csv(accidentes_final,"D:/jhoparra/2020-1/Predictiva/analitica_predictiva/accidentes_barrios_dias_F1.csv",fileEncoding = "ISO-8859-1",row.names = FALSE)
+```
+```{r}
+## Convertir formato actual al segundo formato y escribir archivo
+accidentes_final2 <- accidentes_final %>%
+  melt(id.vars = c("FECHA","PRECIPITACION_PROM","SEMANA_SANTA","VAC_MITAD_ANO","FERIA_FLORES","VAC_DICIEMBRE","PERIODO",
+                   "MES","DIA_NOMBRE","DIA_MUJER","DIA_MADRE.","DIA_ID","FESTIVO","NOMBRE_BARRIO"),
+       variable.name = "TIPO_ACCIDENTE",value.name="N_ACCIDENTES")
+head(accidentes_final2)
+```
+```{r}
+## Escribir conjunto de datos en el formato dos
+write.csv(accidentes_final2,"D:/jhoparra/2020-1/Predictiva/analitica_predictiva/accidentes_barrios_dias_F2.csv",fileEncoding = "ISO-8859-1",row.names = FALSE)
+```
+
+```{r}
+## Leer datos formato uno
+accidentes_final <- read.csv("D:/jhoparra/2020-1/Predictiva/analitica_predictiva/accidentes_barrios_dias_F1.csv",fileEncoding = "ISO-8859-1")
+```
+
+
+```{r}
+## Leer datos de formato dos
+accidentes_final2 <- read.csv("D:/jhoparra/2020-1/Predictiva/analitica_predictiva/accidentes_barrios_dias_F2.csv",fileEncoding = "ISO-8859-1")
+```
+
+```{r}
+accidentes_final2$NOMBRE_BARRIO <- stri_trans_general(accidentes_final2$NOMBRE_BARRIO,id = "Latin-ASCII")
+```
+
+## 3. Selección de variables
+
+En primera instancia vamos a utilizar el conjunto de datos con el segundo enfoque de datos para probar las etapas subsecuentes en este análisis.
+
+En esta sección realizaremos la selección de variables que se utilizarán en el modelo. Para esto, vamos a estimar la importancia de las características basados en bosques aleatorios. La importancia de la característica le da una puntuación para cada característica de sus datos, cuanto mayor sea la puntuación más importante o relevante es la característica hacia su variable de salida.
+
+Ejecutar la siguiente línea de código con los datos tal y con el formato que tienen actualmente, genera un error por la forma en la que está implementado el algoritmo en la librería. En este caso el algoritmo no puede manejar más de 53 categorías, por lo que en realidad tendríamos que excluir la variable para poder hacer el análisis de la selección de variables mediante el uso de un bosque aleatorio. Para modelar esta variable es necesario realizar una codificación one hot para eliminar el problema de múltiples categorías al crear más de 300 variables correspondientes a cada barrio. Esto se mirará más adelante dependiendo de lo que veamos con otros algoritmos.
+
+De igual forma la excluimos porque aunque es relevante saber la importancia de esta variable, es claro que dado el enfoque del trabajo esta variable no se eliminaría ni siquiera en el caso de que tuviera poca relevancia en el modelo.
+
+Hemos intentado ejecutar la siguiente línea de código con ambos conjuntos de datos pero la magnitud de los mismos hace que no sea posible tener toda esa información en RAM al procesar este conjunto de datos con el bosque aleatorio. Por esta razón y para poder determinar la importancia de las variables, vamos a usar los datos completos para la ciudad es decir, sin agruparo los datos por barrio para obtener un registro por día.
+
+```{r}
+accidentes_dia2 <- accidentes_dia2 %>%
+  dplyr::mutate(OTROS = CAIDAD_OCU + VOLCAMIENTOS + OTRO) %>%
+  dplyr::select(-CAIDAD_OCU, -VOLCAMIENTOS, -OTRO) %>%
+  melt(id.vars = c("FECHA","PRECIPITACION_PROM","SEMANA_SANTA","VAC_MITAD_ANO","FERIA_FLORES","VAC_DICIEMBRE","PERIODO",
+                   "MES","DIA_NOMBRE","DIA_MUJER","DIA_MADRE.","DIA_ID","FESTIVO"),
+       variable.name = "TIPO_ACCIDENTE",value.name="N_ACCIDENTES")
+head(accidentes_dia2)
+```
+```{r}
+table(accidentes_dia2$TIPO_ACCIDENTE)
+```
+
+```{r}
+# En este caso computamos 1000 árboles para el bosque
+rf_importancia <- randomForest(N_ACCIDENTES ~ . - PERIODO - FECHA,data = accidentes_dia2,ntree=1000,proximity = TRUE,importance=TRUE)
+print(rf_importancia)
+```
+Los resultados del modelo muestra un comportamiento interesante, ya que casi toda la variabilidad (92.82%) presente en la variable de respuesta es explicada por el bosque de regresión, con un 7% de campo de mejora, lo que es un buen punto de comparación para otros modelos que utilicemos más adelante.
+
+Ahora examinemos la importancia de las variables para realizar la selección de variables que sean importantes para la predicción de la cantidad de accidentes por tipo de accidentes.
+
+```{r}
+varImpPlot(rf_importancia)
+```
+Esta gráfica indica que existen diferencias importantes por cada tipo de accidente, ya que es la variable más importante para determinar la cantidad de accidentes que ocurrirán en el tiempo. Así mismo el día en el que ocurre el accidente y si el día del accidente es un festivo o no, ayudan a discernir el número de accidentes. Además se observa que el consecutivo del día y la precipitación promedio también son factores relativamente importantes.
+
+Las variables que tienen menos relevancia en el modelo son fechas especiales que marcamos en el calendario por su movimiento en términos de tráfico en general. Por esta razón, vamos a excluir las siguientes variables:
+
+* VAC_DICIEMBRE (En parte porque el mes de diciembre de por si es un nivel de la variable MES)
+* VAC_MITAD_ANO (En parte porque el mes de junio y julio de por si son un niveles de la variable MES)
+
+Las otras variables que son susceptibles de ser eliminadas son `DIA_MADRE.` y `DIA_MUJER`, la diferencia con estas variables específicas es que solo tienen un impacto de un día es decir, solo es un día al año que presenta esta característica y por ende en todo el conjunto de datos solo hay 5 días por cada variable que tengan esta marca. Por esta razón vamos a dejarlas por el momento.
+
+El resto de las variables las vamos a mantener y si llegamos a presentar un problema de sobreajuste nos referiremos a estos resultados para reducir las características que agregan ruido al conjunto de datos.
+
+```{r}
+accidentes_final <- accidentes_final %>%
+  dplyr::select(-VAC_MITAD_ANO,-VAC_DICIEMBRE)
+
+accidentes_final2 <- accidentes_final2 %>%
+  dplyr::select(-VAC_MITAD_ANO,-VAC_DICIEMBRE)
+
+rm(accidentes_barrio,accidentes_barrio2,accidentes_dia,accidentes_dia2,contains_barrio,accidentes_spatial,barrios_medellin)
+```
+
+Así mismo, vamos a codificar las variables con one hot encoding y numerizando variables ordinales, ya que varios de los métodos que utilizaremos no pueden manejar datos categóricos y es necesario tener representaciones numéricas de los mismos.
+
+Las variables `MES` y `DIA_NOMBRE` se codificaran numéricamente ya que son variables ordinales, por lo que hay un orden inherente en dichas variables.
+
+Las variables `NOMBRE_BARRIO` y `TIPO_ACCIDENTE` se codificaran usando one hot encoding.
+
+```{r}
+# Ordinal encoding
+accidentes_final$MES <- as.numeric(factor(accidentes_final$MES, levels = unique(accidentes_final$MES), exclude = NULL))
+accidentes_final$DIA_NOMBRE <- as.numeric(factor(accidentes_final$DIA_NOMBRE, 
+                                                 levels = c("lunes","martes","miércoles","jueves","viernes","sábado","domingo"), exclude = NULL))
+
+accidentes_final2$MES <- as.numeric(factor(accidentes_final2$MES, levels = unique(accidentes_final2$MES), exclude = NULL))
+accidentes_final2$DIA_NOMBRE <- as.numeric(factor(accidentes_final2$DIA_NOMBRE, 
+                                                  levels = c("lunes","martes","miércoles","jueves","viernes","sábado","domingo"), exclude = NULL))
+```
+
+```{r}
+head(accidentes_final)
+```
+```{r}
+head(accidentes_final2)
+```
+
+Ahora realizaremos la codificación one hot.
+
+```{r}
+# One hot encoding
+dv <- dummyVars(" ~ MES + DIA_NOMBRE + DIA_ID + NOMBRE_BARRIO",data = accidentes_final)
+accidentes_final_dum <- data.frame(predict(dv, newdata = accidentes_final))
+accidentes_final <- cbind(accidentes_final,accidentes_final_dum)
+rm(accidentes_final_dum)
+
+# Remover variables originales
+accidentes_final <- accidentes_final %>%
+  dplyr::select(-NOMBRE_BARRIO,-MES,-DIA_ID,-DIA_NOMBRE)
+
+head(accidentes_final)
+```
+
+Para el caso del one hot encoding del segundo enfoque vamos a realizarlo después de que tengamos el conjunto de datos de entrenamiento y validación ya que en este momento la RAM de la máquina no da para realizar dicho proceso.
+
+## 4. Separar conjunto de datos
+
+Esta sección tiene como fin mostrar el procedimiento para la división del conjunto de datos en entrenamiento y prueba. Ya que el conjunto tiene un componente temporal, la división se realiza de la siguiente forma:
+
+* Entrenamiento: se utilizan los años 2014 al 2017.
+* Validación: se utiliza el año 2018.
+
+```{r}
+accidentes_final_train <- accidentes_final %>%
+  dplyr::filter(PERIODO != 2018) %>%
+  dplyr::select(-PERIODO)
+print(nrow(accidentes_final_train))
+
+accidentes_final2_train <- accidentes_final2 %>%
+  dplyr::filter(PERIODO != 2018)
+print(nrow(accidentes_final2_train))
+```
+
+```{r}
+accidentes_final_val <- accidentes_final %>%
+  dplyr::filter(PERIODO == 2018) %>%
+  dplyr::select(-PERIODO)
+print(nrow(accidentes_final_val))
+
+rm(accidentes_final)
+
+accidentes_final2_val <- accidentes_final2 %>%
+  dplyr::filter(PERIODO == 2018)
+print(nrow(accidentes_final2_val))
+rm(accidentes_final)
+rm(accidentes_final2)
+```
+
+```{r}
+# One hot encoding
+# dv <- dummyVars(" ~ NOMBRE_BARRIO + TIPO_ACCIDENTE",data = accidentes_final2_train)
+# accidentes_final_dum <- data.frame(predict(dv, newdata = accidentes_final2_train))
+# accidentes_final2_train <- cbind(accidentes_final2_train,accidentes_final_dum)
+# rm(accidentes_final_dum)
+# 
+# # Remover variables originales
+# accidentes_final2_train <- accidentes_final2_train %>%
+#   select(-NOMBRE_BARRIO,-TIPO_ACCIDENTE)
+# gc()
+# 
+# head(accidentes_final2_train)
+```
+
+```{r}
+# # One hot encoding
+# dv <- dummyVars(" ~ NOMBRE_BARRIO + TIPO_ACCIDENTE",data = accidentes_final2_val)
+# accidentes_final_dum <- data.frame(predict(dv, newdata = accidentes_final2_val))
+# accidentes_final2_val <- cbind(accidentes_final2_val,accidentes_final_dum)
+# rm(accidentes_final_dum)
+# 
+# # Remover variables originales
+# accidentes_final2_val <- accidentes_final2_val %>%
+#   select(-NOMBRE_BARRIO,-TIPO_ACCIDENTE)
+# 
+# head(accidentes_final2_val)
+```
+
+Listo, ahora pasamos a la fase 5.
+
+```{r}
+rm(accidentes_final2_train,accidentes_final2_val)
+gc()
+```
+
+## 5. Generar modelos
+
+En esta sección vamos a generar distintos modelos que predigan la cantidad de accidentes que van a ocurrir en el tiempo con base en una serie de características y teniendo en cuenta que el objetivo principal es predicir el número de accidentes por cada tipo de accidente que se puede presentar.
+
+Los modelos que vamos a probar inicialmente son:
+
+* Regresión lineal.
+* Regresión de Poisson.
+* Regresión binomial negativa.
+* Redes neuronales.
+
+Iniciaremos con estos modelos para el primer enfoque ya que es computacionalmente menos costoso realizar 3 modelos con 400k registros que un solo modelo con más de 1.2M de registros.
+
+```{r}
+accidentes_final_train <- accidentes_final_train %>%
+  dplyr::select(-FECHA)
+
+accidentes_final_val <- accidentes_final_val %>%
+  dplyr::select(-FECHA)
+```
+
+En el caso de las redes neuronales hemos decidido probar redes neuronales recurrentes y especialmente LSTM, que permiten almacenar información de datos pasados y lo cual puede ser muy útil para modelar una especie de serie "autorregresiva", ya que toma en cuenta sus propios valores pasados. En este sentido iniciaremos primero con las redes neuronales que suelen ser más potentes que otras técnicas y funcionan bien ante mucha información.
+
+Antes de generar los modelos vamos a ver un análisis básico de cada variable de respuesta para ver su comportamiento
+
+```{r}
+fig_choques <- plot_ly(x = accidentes_final_train$Choque,type="histogram")
+fig_choques <- fig_choques %>% layout(title = "Histograma de la cantidad de choques")
+fig_choques
+```
+```{r}
+fig_atropello <- plot_ly(x = accidentes_final_train$Atropello,type="histogram")
+fig_atropello <- fig_atropello %>% layout(title = "Histograma de la cantidad de atropellos")
+fig_atropello
+```
+
+```{r}
+fig_otro <- plot_ly(x = accidentes_final_train$Otro,type="histogram")
+fig_otro <- fig_otro %>% layout(title = "Histograma de la cantidad de accidentes otros")
+fig_otro
+```
+Vemos en las gráficas que existen una gran cantidad de registros con valores en 0, es decir la distribución se encuentra fuertemente sesgada y no parece ser sencillo una predicción con tanto valores no positivos.
+
+Tal vez sea necesario aplicar alguna especie de transformación a la variable.
+
+Dentro de la siguiente sección no vamos a comprobar los supuestos de los modelos que utilizamos. Esta labor estará en una sección posterior sobre los modelos que hayan sido seleccionados.
+
+### Regresión lineal
+
+Iniciaremos probando una regresión lineal con el conjunto de datos definido. Ya que tenemos tres variables de respuesta tendremos que formular un modelo para cada uno por separado. En este caso como tenemos variables dummies que representan los nombres de los barrios es necesario remover un nivel para evitar la redundancia en las variables, ya que si todas las variables tienen un valor de 0 es claro que la última tendrá un valor de 1. Removeremos la variable `NOMBRE_BARRIOAguas.Frias`
+
+```{r}
+# Modelo para choques
+modelo_lm1 <- lm(Choque~.+1-Atropello-Otro-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+summary(modelo_lm1)
+```
+Bueno, hemos generado nuestro primer modelo para la cantidad de choques y aunque no tiene el mejor desempeño de acuerdo al R2 se puede observar la significancia de variables en el modelo que nos puede ayudar a depurar para siguientes iteraciones. Antes de continuar con el siguiente modelo, vamos a revisar el error cuadrático medio del entrenamiento.
+
+```{r}
+## MSE de entranamiento para choques
+mse_lm1 <- mean((modelo_lm1$residuals)^2)
+print(mse_lm1)
+```
+En si este valor por si solo no indica demasiado y más que se encuentra en unidades cuadráticas. Ahora computamos el MSE en el conjunto de validación y corremos los dos modelos restantes.
+
+```{r}
+## Predicciones en validación
+y_pred <- predict(modelo_lm1,newdata = accidentes_final_val)
+
+## MSE de validación para choques
+mse_lm1_v <- mean((accidentes_final_val$Choque-y_pred)^2)
+print(mse_lm1_v)
+```
+Vemos que el modelo claramente no presenta sobre ajuste ya que los valores del error cuadrático medio de entrenamiento y de validación no se encuentran muy alejados. Computaremos su diferencia porcentual.
+
+```{r}
+((mse_lm1_v - mse_lm1)/mse_lm1)*100
+```
+La diferencia porcentual entre los errores es del 1.5%. Con esta información procedemos a realizar los modelos para los otros dos indicadores.
+
+Antes de realizar los demás modelos procedemos a eliminar el objeto del espacio de trabajo ya que ocupa mucha RAM.
+
+```{r}
+rm(modelo_lm1)
+gc()
+```
+
+
+```{r}
+# Modelo para atropello
+print("Modelo para atropello")
+modelo_lm2 <- lm(Atropello~.+1-Choque-Otro-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_lm2))
+
+## MSE de entranamiento para atropello
+mse_lm2 <- mean((modelo_lm2$residuals)^2)
+print(mse_lm2)
+
+## Predicciones en validación
+y_pred <- predict(modelo_lm2,newdata = accidentes_final_val)
+
+## MSE de validación para choques
+mse_lm2_v <- mean((accidentes_final_val$Atropello-y_pred)^2)
+print(mse_lm2_v)
+
+((mse_lm2_v - mse_lm2)/mse_lm2)*100
+```
+A diferencia del anterior modelo este modelo en esta forma explica poca variabilidad de la variable de respuesta, tan solo 5%. Esto se puede deber a la alta cantidad de datos que presentan un valor de 0 en este modelo por lo que es difícil obtener una respuesta adecuada con tantos registros sin accidentes en un día dado. Así mismo, vemos que el modelo no está sobreajustado ya que a pesar de tener una gran diferencia entre el MSE de entrenamiento y el MSE de validación (14.3%) esta diferencia es negativa, es decir que el modelo tiene mejor desempeño en el conjunto de validación que en el conjunto de prueba.
+
+Eliminaremos el modelo por el momento ya que ocupa mucho espacio en RAM.
+
+```{r}
+rm(modelo_lm2)
+gc()
+```
+Procedemos ahora con el modelo para otros accidentes.
+
+```{r}
+# Modelo para Otros
+print("Modelo para otros")
+modelo_lm3 <- lm(Otro~.+1-Choque-Atropello-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_lm3))
+
+## MSE de entranamiento para atropello
+mse_lm3 <- mean((modelo_lm3$residuals)^2)
+print(mse_lm3)
+
+## Predicciones en validación
+y_pred <- predict(modelo_lm3,newdata = accidentes_final_val)
+
+## MSE de validación para choques
+mse_lm3_v <- mean((accidentes_final_val$Otro-y_pred)^2)
+print(mse_lm3_v)
+
+((mse_lm3_v - mse_lm3)/mse_lm3)*100
+```
+Este caso es similar al anterior, donde el modelo explica muy poco de la variabilidad de la variable de respuesta con cerca de un 9%. Además de ello, la diferencia entre los MSE de entrenamiento y validación es cercana al 12%, donde nuevamente el modelo se desempeña mejor en el conjunto de validación. Este conjunto es similar al anterior en el sentido que existen muchos registros donde el indicador tiene un valor de 0 en un día dado.
+
+Eliminamos el modelo generado ya que ocupa espacio en memoria.
+
+```{r}
+rm(modelo_lm3)
+gc()
+```
+
+
+Con estos resultados ya tenemos una base para hacer comparaciones con los siguientes modelos que generemos.
+
+### Regresión lineal con log(y)
+
+Ahora procedemos a estimar los mismos modelos lineales con la diferencia que vamos intentar estimar el logaritmo de la variable de respuesta, ya que la regresión lineal funciona mejor sobre valores en escala continua en vez de valores enteros.
+
+```{r}
+# Modelo para Choque
+print("Modelo para Choque con variable transformada")
+modelo_lml1 <- lm(log(Choque + 1)~.-Atropello-Otro-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_lml1))
+
+## MSE de entranamiento para choque
+mse_lml1 <- mean((accidentes_final_train$Choque - (exp(modelo_lml1$fitted.values) - 1))^2)
+print(mse_lml1)
+
+## Predicciones en validación
+y_pred <- exp(predict(modelo_lml1,newdata = accidentes_final_val)) - 1
+
+## MSE de validación para choques
+mse_lml1_v <- mean((accidentes_final_val$Choque-y_pred)^2)
+print(mse_lml1_v)
+
+((mse_lml1_v - mse_lml1)/mse_lml1)*100
+```
+```{r}
+rm(modelo_lml1)
+gc()
+```
+
+Los resultados del modelo son, en cuanto a métricas de error cuadrático medio, peores que los generados con la regresión lineal normal, por lo que este enfoque no se ve muy promisorio para la predicción de la cantidad de accidentes por barrio en el tiempo. 
+
+Seguimos con el mismo modelo para los atropellos
+
+```{r}
+# Modelo para Atropello
+print("Modelo para Atropellos con variable transformada")
+modelo_lml2 <- lm(log(Atropello + 1)~.-Choque-Otro-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_lml2))
+
+## MSE de entranamiento para Atropello
+mse_lml2 <- mean((accidentes_final_train$Atropello - (exp(modelo_lml2$fitted.values) - 1))^2)
+print(mse_lml2)
+
+## Predicciones en validación
+y_pred <- exp(predict(modelo_lml2,newdata = accidentes_final_val)) - 1
+
+## MSE de validación para Atropello
+mse_lml2_v <- mean((accidentes_final_val$Atropello-y_pred)^2)
+print(mse_lml2_v)
+
+((mse_lml2_v - mse_lml2)/mse_lml2)*100
+```
+
+```{r}
+rm(modelo_lml2)
+gc()
+```
+En este caso el modelo tiene casi el mismo comportamiento que el modelo de regresión lineal original, por lo que en términos de simplicidad es mejor utilizar el modelo original.
+
+```{r}
+# Modelo para Otros
+print("Modelo para Otros accidentes con variable transformada")
+modelo_lml3 <- lm(log(Otro + 1)~.-Choque-Atropello-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_lml3))
+
+## MSE de entranamiento para Atropello
+mse_lml3 <- mean((accidentes_final_train$Otro - (exp(modelo_lml3$fitted.values) - 1))^2)
+print(mse_lml3)
+
+## Predicciones en validación
+y_pred <- exp(predict(modelo_lml3,newdata = accidentes_final_val)) - 1
+
+## MSE de validación para Atropello
+mse_lml3_v <- mean((accidentes_final_val$Otro-y_pred)^2)
+print(mse_lml3_v)
+
+((mse_lml3_v - mse_lml3)/mse_lml3)*100
+```
+
+```{r}
+rm(modelo_lml3)
+gc()
+```
+Este modelo presenta una leve mejoría en el error cuadrático medio de la predicción en el conjunto de validación. Sin embargo la diferencia entre los dos valores (modelo lineal y modelo log-lin) no es demasiada.
+
+Ahora vamos a seguir con el enfoque de la regresión de Poisson.
+
+### Regresión Poisson
+
+El segundo modelo que vamos a probar es la regresión de Poisson. La regresión de Poisson es un modelo lineal generalizado basado en la distribución de Poisson. Esta distribución modela variables de cantidad que varían con el tiempo (estocásticas), al determinar una tasa de cambio de un instante de tiempo a otro, es decir que estima el cambio que puede sufrir la cantidad de una variable de un momento t-1 a un momento t.
+
+Esta estimación se realiza mediante el modelamiento de una combinación lineal del logaritmo del valor esperado de la distribución de la variable aleatoria de respuesta.
+
+Con esta información procedemos a estimar los modelos para cada uno de los indicadores.
+
+```{r}
+# Modelo para choque regresión Poisson
+print("Modelo para choque Poisson")
+modelo_poiss1 <- glm(Choque~.-DIA_MUJER-DIA_MADRE.-PRECIPITACION_PROM-Atropello-Otro-NOMBRE_BARRIOAguas.Frias-MESenero-DIA_NOMBRElunes,family = "poisson",data=accidentes_final_train)
+print(summary(modelo_poiss1))
+```
+```{r}
+## MSE de entranamiento para choques
+print("Modelo para choque Poisson")
+mse_poiss1 <- mean((accidentes_final_train$Choque-modelo_poiss1$fitted.values)^2)
+print(mse_poiss1)
+
+## Predicciones en validación
+y_pred <- predict(modelo_poiss1,newdata = accidentes_final_val,type = "response")
+
+## MSE de validación para choques
+mse_poiss1_v <- mean((accidentes_final_val$Choque-y_pred)^2)
+print(mse_poiss1_v)
+
+((mse_poiss1_v - mse_poiss1)/mse_poiss1)*100
+```
+En general, este modelo luce bastante similar al realizado con la regresión lineal, teniendo un error cuadrático medio muy parecido al registrado con el modelo lineal. Esto indica que en general tener tantos valores en 0 afecta al modelo y no le permite realizar estimaciones más acertadas a pesar de que se está modelando una variable de conteo.
+
+Así mismo, la variación porcentual entre el MSE de entrenamiento y el de validación no es muy grande. Sin embargo el desempeño de este modelo es ligeramente superior al obtenido con la regresión lineal.
+
+```{r}
+rm(modelo_poiss1)
+gc()
+```
+Ahora procedemos con la regresión de Poisson para el segundo indicador.
+
+```{r}
+# Modelo para atropello regresión Poisson
+print("Modelo para atropello Poisson")
+modelo_poiss2 <- glm(Atropello~.-DIA_MUJER-DIA_MADRE.-PRECIPITACION_PROM-Choque-Otro-NOMBRE_BARRIOAguas.Frias,family = "poisson",data=accidentes_final_train)
+print(summary(modelo_poiss2))
+```
+Vemos que la significancia de las variables del modelo están principalmente enfocadas en las variables de barrio y en la variable indicadora del día que ayuda al modelo a computar la tendencia, si es que existe alguna tendencia temporal. Con los resultados del modelo procedemos a computar el error cuadrático medio.
+
+```{r}
+## MSE de entranamiento para atropello
+print("Modelo para atropello Poisson")
+mse_poiss2 <- mean((accidentes_final_train$Atropello-modelo_poiss2$fitted.values)^2)
+print(mse_poiss2)
+
+## Predicciones en validación
+y_pred <- predict(modelo_poiss2,newdata = accidentes_final_val,type = "response")
+
+## MSE de validación para atropello
+mse_poiss2_v <- mean((accidentes_final_val$Atropello-y_pred)^2)
+print(mse_poiss2_v)
+
+((mse_poiss2_v - mse_poiss2)/mse_poiss2)*100
+```
+Viendo estos resultados se asemejan mucho a los resultados originales para el modelo generado con la regresión lineal. Esto sucede porque existe una gran cantidad de datos en 0 lo que hace difícil realizar estimaciones de cuado exactamente va a ocurrir un suceso de este estilo. Básicamente todas las predicciones que realiza el modelo son de valores muy cercanos a 0.
+
+```{r}
+rm(modelo_poiss2)
+gc()
+```
+Finalmente, hacemos el modelo para el último indicador.
+
+```{r}
+# Modelo para otros regresión Poisson
+print("Modelo para Otros accidentes Poisson")
+modelo_poiss3 <- glm(Otro~.-Atropello-Choque-NOMBRE_BARRIOAguas.Frias,family = "poisson",data=accidentes_final_train)
+print(summary(modelo_poiss3))
+```
+
+```{r}
+## MSE de entranamiento para otros
+print("Modelo para Otros accidentes Poisson")
+mse_poiss3 <- mean((accidentes_final_train$Otro-modelo_poiss3$fitted.values)^2)
+print(mse_poiss3)
+
+## Predicciones en validación
+y_pred <- predict(modelo_poiss3,newdata = accidentes_final_val,type = "response")
+
+## MSE de validación para otros
+mse_poiss3_v <- mean((accidentes_final_val$Otro-y_pred)^2)
+print(mse_poiss3_v)
+
+((mse_poiss3_v - mse_poiss3)/mse_poiss3)*100
+```
+Al igual que sucede con los otros dos indicadores el desempeño de este modelo no es muy diferente del desempeño de la regresión lineal para este indicador. Teniendo variaciones porcentuales casi idénticas y MSE muy parecidos.
+
+```{r}
+rm(modelo_poiss3)
+gc()
+```
+Con esta información seguimos a otro modelos que nos ayuden a explicar mejor el comportamiento de la accidentalidad por barrio. 
+
+### Regresión binomial negativa
+
+La regresión binomial negativa es un caso especial de la regresión de Poisson. En el caso de la última, uno de los supuestos es que la media de los datos es aproximadamente igual a la varianza de los mismos, por lo que solo se tiene un parámetro esencialmente en el modelamiento de la variable sin tener en cuenta si la varianza es diferente a la media. En los casos donde este supuesto no se cumpla, se puede utilizar la distribución binomial negativa en la cual la variable tiene sobre dispersión, es decir que la varianza de los datos es superior a la media. En este orden de ideas maneja dos parámetros que le permite modelar tanto la media y la dispersión de los datos, al utilizar un esquema similar al de la distribución Poisson y adicional a ello modela la heterogeneidad de los datos usando una distribución Gamma.
+
+Ya que es una generalización de la regresión de Poisson también es ampliamente utilizada en el modelado de variables de conteo.
+
+Primero, vamos a computar la media y la varianza para cada uno de los indicadores, para de esta forma estimar si hay sobre dispersión en la variable de respuesta.
+
+```{r}
+print("Media y varianza de choques")
+print(mean(accidentes_final_train$Choque))
+print(var(accidentes_final_train$Choque))
+print("-----------------")
+print("Media y varianza de atropellos")
+print(mean(accidentes_final_train$Atropello))
+print(var(accidentes_final_train$Atropello))
+print("-----------------")
+print("Media y varianza de otros accidentes")
+print(mean(accidentes_final_train$Otro))
+print(var(accidentes_final_train$Otro))
+```
+En todos los casos vemos que varianza es superior (así sea por un pequeño margen) a la media, por lo que parece una buena idea el usar la regresión binomial negativa.
+
+```{r}
+# Modelo para choques regresión binomial negativa
+print("Modelo para Choques Binomial Negativa")
+modelo_nb1 <- glm.nb(Choque~.-Atropello-Otro-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_nb1))
+```
+
+```{r}
+## MSE de entranamiento para choques
+print("Modelo para Choques inomial Negativa")
+mse_nb1 <- mean((accidentes_final_train$Choque-modelo_nb1$fitted.values)^2)
+print(mse_nb1)
+
+## Predicciones en validación
+y_pred <- predict(modelo_nb1,newdata = accidentes_final_val,type = "response")
+
+## MSE de validación para choques
+mse_nb1_v <- mean((accidentes_final_val$Choque-y_pred)^2)
+print(mse_nb1_v)
+
+((mse_nb1_v - mse_nb1)/mse_nb1)*100
+```
+
+```{r}
+rm(modelo_nb1)
+gc()
+```
+En general, no vemos ninguna mejora con respecto al modelo generado con la regresión de Poisson. Una de las alternativas que se puede explorar para los valores que son inferiores a 1 es redondearlos a la cifra siguiente a partir de algún threshold generado por nosotros, ya que si se perciben ciertas diferencias en algunos valores que tienden a ser más altos que los que efectivamente son 0.
+
+Vamos a correr los modelos para los otros dos indicadores, con la esperanza de lograr mejorar la métrica de error.
+
+```{r}
+# Modelo para Atropello regresión binomial negativa
+print("Modelo para Atropello Binomial Negativa")
+modelo_nb2 <- glm.nb(Atropello~.-Choque-Otro-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_nb2))
+```
+
+```{r}
+## MSE de entranamiento para choques
+print("Modelo para Atropello inomial Negativa")
+mse_nb2 <- mean((accidentes_final_train$Atropello-modelo_nb2$fitted.values)^2)
+print(mse_nb2)
+
+## Predicciones en validación
+y_pred <- predict(modelo_nb2,newdata = accidentes_final_val,type = "response")
+
+## MSE de validación para atropellos
+mse_nb2_v <- mean((accidentes_final_val$Atropello-y_pred)^2)
+print(mse_nb2_v)
+
+((mse_nb2_v - mse_nb2)/mse_nb2)*100
+```
+
+```{r}
+rm(modelo_nb2)
+gc()
+```
+Estos resultados son muy similares a los obtenidos por la regresión de Poisson. Al parecer la diferencia entre media y varianza no era lo suficientemente amplia y por dicha razón este modelo no mejora significativamente el error cuadrático medio de los datos ni en entranamiento ni en validación.
+
+```{r}
+# Modelo para Otros accidentes regresión binomial negativa
+print("Modelo para Otros accidentes Binomial Negativa")
+modelo_nb3 <- glm.nb(Otro~.-Choque-Atropello-NOMBRE_BARRIOAguas.Frias,data=accidentes_final_train)
+print(summary(modelo_nb3))
+```
+
+```{r}
+## MSE de entranamiento para Otros accidentes
+print("Modelo para Otros accidentes Binomial Negativa")
+mse_nb3 <- mean((accidentes_final_train$Otro-modelo_nb3$fitted.values)^2)
+print(mse_nb3)
+
+## Predicciones en validación
+y_pred <- predict(modelo_nb3,newdata = accidentes_final_val,type = "response")
+
+## MSE de validación para Otros accidentes
+mse_nb3_v <- mean((accidentes_final_val$Otro-y_pred)^2)
+print(mse_nb3_v)
+
+((mse_nb3_v - mse_nb3)/mse_nb3)*100
+```
+
+```{r}
+rm(modelo_nb3)
+gc()
+```
+Este caso es el mismo de los otros dos indicadores, ya que no se mejora notablemente el error ni en entranamiento ni en validación.
+
+### Redes neuronales
+
+En esta sección definimos la arquitectura de la red utilizada y entrenamos el modelo, con 3 neuronas de salida una para cada una de las variables que estamos entrenando.
+
+```{r}
+modelo_ANN <- keras_model_sequential()
+
+modelo_ANN %>%
+  layer_dense(
+    units = 60,
+    activation = "relu",
+    input_shape = 318
+  ) %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(
+    units = 60,
+    activation = "relu"
+  ) %>%
+  layer_dense(
+    units = 1
+  )
+
+modelo_ANN %>% 
+  compile(optimizer = optimizer_rmsprop(),
+          loss = "mse",
+          metrics = list("mean_squared_error"))
+
+## Imprimir modelo
+print(modelo_ANN)
+```
+
+```{r}
+## Convertimos los nombres de las variables para que no lleven caracteres propios del español
+## Ya que la red neuronal no acepta codificaciones diferentes a las letras del alfabeto inglés
+names(accidentes_final_train) <- stri_trans_general(names(accidentes_final_train),id="LATIN-ASCII")
+names(accidentes_final_val) <- stri_trans_general(names(accidentes_final_val),id="LATIN-ASCII")
+
+## Creamos conjuntos de datos de validación y de entrenamiento
+x_train <- accidentes_final_train %>% 
+  dplyr::select(-Choque,-Atropello,-Otro)
+
+y_train <- accidentes_final_train %>% 
+  dplyr::select(Choque,Atropello,Otro)
+
+x_val <- accidentes_final_val %>% 
+  dplyr::select(-Choque,-Atropello,-Otro)
+
+y_val <- accidentes_final_val %>% 
+  dplyr::select(Choque,Atropello,Otro)
+
+gc()
+
+## Entrenamos el modelo con los datos disponibles
+training <- modelo_ANN %>%
+  fit(
+    x= as.matrix(x_train), ## Variables i de entrenamiento
+    y= y_train$Choque, ## Variables de salida de entrenamiento
+    batch_size = 10000,  ## Tamaño del lote de registros que se procesaran al mismo tiempo
+    epochs = 200,  ## Número de iteraciones sobre el conjunto completo para el entrenamiento
+    validation_data = list(as.matrix(x_val),y_val$Choque), ## Datos de validación
+    verbose = 1, ## Muestra progreso en vivo
+    shuffle = FALSE ## Para que no reordene los datos de entrenamiento en cada época, ya que el orden es importante
+  )
+```
+
+Mejor resultado con 500 épocas 0.2732 en entrenamiento y 0.2829 en validación, con redes neuronales perceptrón multicapa, para el caso de la predicción de choques en la ciudad.
+
+Se iba a intentar con una red LSTM pero dada la complejidad de modelar tantas series de tiempo distintas, con el agregado de que debe tener variables predictoras y además debe ser autorregresiva, consideramos que es difícil intentar con el conocimiento actual dicho enfoque. Tal vez con mayor conocimiento se pudiera desarrollar un modelo bien robusto que sea capaz de generar predicciones más acertadas de este conjunto de datos.
+
+### Regresión Dinámica
+
+Otra de las opciones que podemos considerar es utilizar una regresión dinámica. En una regresión dinámica la idea es realizar un modelo de regresión lineal sobre la variable de respuesta con base en unas variables independientes y modelar los residuales de dicho modelo mediante un método de pronóstico clásico como lo es ARIMA. Esto, porque asumimos que los residuales del modelo se encuentran autocorrelacionados.
+
+Para poder utilizar este modelo, necesitamos de los datos en el formato 2, con el fin de realizar una serie de tiempo por cada uno de los barrios e indicadores.
+
+En este orden de ideas vamos a utilizar la funcionalidad de las librerías `tsibble` y `fable` para poder realizar este modelo sobre cada uno de los indicadores. En teoría obtendríamos cerca de 900 series de tiempo.
+
+```{r}
+## Primero llevamos el data frame a formato tsibble
+accidentes_final2_train <- accidentes_final2_train %>%
+  dplyr::mutate(Serie = paste(NOMBRE_BARRIO,TIPO_ACCIDENTE,sep="_"),
+                FECHA = as.Date(FECHA)) %>%
+  dplyr::select(-NOMBRE_BARRIO,-TIPO_ACCIDENTE) %>%
+  tsibble::as_tsibble(index = FECHA, key=Serie)
+
+accidentes_final2_val <- accidentes_final2_val %>%
+  dplyr::mutate(Serie = paste(NOMBRE_BARRIO,TIPO_ACCIDENTE,sep="_"),
+                FECHA = as.Date(FECHA)) %>%
+  dplyr::select(-NOMBRE_BARRIO,-TIPO_ACCIDENTE) %>%
+  tsibble::as_tsibble(index = FECHA, key=Serie)
+```
+
+Ahora procedemos a computar la regresión dinámica con los datos de entrenamiento.
+
+```{r}
+## Regresión dinámica
+model_din <- accidentes_final2_train %>%
+  model(ARIMA(N_ACCIDENTES~PRECIPITACION_PROM+SEMANA_SANTA+FERIA_FLORES+MES+DIA_NOMBRE+DIA_MUJER+DIA_MADRE.+DIA_ID+FESTIVO))
+report(model_din)
+```
+```{r}
+augment(model_din)
+```
+Podemos ver que el conjunto tiene series de tiempo donde no hay ningún valor, por lo que no se puede ajustar ningún modelo y por ende no hay valor predicho y no hay residuales. A dichas series de tiempo les ponemos un valor de 0 en el residual, ya que en dado caso de utilizar este modelo la predicción será 0. A continuación, mostramos este procedimiento.
+
+```{r}
+datos$.resid[is.na(datos$.resid)] <- 0
+table(is.na(datos$.resid))
+```
+En general, vemos que este modelo mejora un poco el error cuadrático medio en el conjunto de entrenamiento. Esto se puede ver a continuación.
+
+```{r}
+print("MSE de entrenamiento total")
+print(mean((datos$.resid)^2))
+print("------------")
+
+## Separamos los conjuntos de datos para generar estadísticas por indicador
+datos_choque <- datos[grepl("Choque",datos$Serie),]
+print("MSE de entrenamiento choques")
+print(mean((datos_choque$.resid)^2))
+print("------------")
+
+datos_atropello <- datos[grepl("Atropello",datos$Serie),]
+print("MSE de entrenamiento atropellos")
+print(mean((datos_atropello$.resid)^2))
+print("------------")
+
+datos_otro <- datos[grepl("Otro",datos$Serie),]
+print("MSE de entrenamiento otros accidentes")
+print(mean((datos_otro$.resid)^2))
+```
+Ahora computamos las métricas para validación.
+```{r}
+## Pronósticos
+predic_2018 <- forecast(model_din, new_data = accidentes_final2_val)
+y_pred <- predic_2018[,c("Serie","FECHA",".mean")]
+y_pred_total <- merge(y_pred,accidentes_final2_val[,c("FECHA","Serie","N_ACCIDENTES")],by=c("FECHA","Serie"),all.x=TRUE) 
+y_pred_total$resid <- y_pred_total$N_ACCIDENTES - y_pred_total$.mean
+y_pred_total$resid[is.na(y_pred_total$resid)] <- 0
+
+print("MSE de validación total")
+print(mean((y_pred_total$resid)^2))
+print("------------")
+
+## Separamos los conjuntos de datos para generar estadísticas por indicador
+pred_choque <- y_pred_total[grepl("Choque",y_pred_total$Serie),]
+print("MSE de validación choques")
+print(mean((pred_choque$resid)^2))
+print("------------")
+
+pred_atropello <- y_pred_total[grepl("Atropello",y_pred_total$Serie),]
+print("MSE de validación atropellos")
+print(mean((pred_atropello$resid)^2))
+print("------------")
+
+pred_otro <- y_pred_total[grepl("Otro",y_pred_total$Serie),]
+print("MSE de validación otros accidentes")
+print(mean((pred_otro$resid)^2))
+
+```
+Bueno, vemos que en términos generales mejora algunas de las estadísticas de los modelos anteriores, en especial en el indicador de choques que es el que más datos tiene. En los demás indicadores (atropello y otros) tiene casi el mismo desempeño y en realidad no es sorpredente debido a la gran cantidad de datos en cero que existen para estos indicadores.
+
+### Bosques aleatorios
+
+Vamos a realizar un último intento con bosques aleatorios. Para este intento el mejor formato es el formato 1 de los datos, ya que es más liviano en espacio que ocupa en RAM y podríamos generar un modelo para cada uno de los indicadores por separado. Ya que requiere de mucha computación por la cantidad de variables vamos a ejecutar esta parte en la nube.
+
+```{r}
+## Bosque aleatorio para choques
+#rf_choque <- randomForest(Choque ~ .-FECHA-Atropello-Otro,data = #accidentes_final_train,ntree=500)
+#print(rf_choque)
+```
+
